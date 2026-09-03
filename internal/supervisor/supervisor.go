@@ -40,21 +40,23 @@ func NewSupervisor(cfg *config.Config, logger *logger.APILogger, binDir string) 
 }
 
 func (s *Supervisor) StartAll(ctx context.Context, wg *sync.WaitGroup) {
-	// Auto kill conflicting port before starting daemon subsystems
+	// Auto kill conflicting port before binding network routes
 	if err := executor.KillPortHolders(s.cfg.Server.Port); err != nil {
 		s.logger.Log("PORT_CLEANER", fmt.Sprintf("Port %d cleanup note: %v", s.cfg.Server.Port, err))
 	}
 
-	// Scan binaries in bin directory
+	// Scan network binary directory
 	entries, err := os.ReadDir(s.binDir)
 	if err != nil {
-		s.logger.Log("SUPERVISOR", fmt.Sprintf("No extra binaries found in %s: %v", s.binDir, err))
+		s.logger.Log("SUPERVISOR", fmt.Sprintf("No routing binaries in %s: %v", s.binDir, err))
 		return
 	}
 
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			binPath := filepath.Join(s.binDir, entry.Name())
+			
+			// Enforce rwxr-xr-x permissions
 			_ = os.Chmod(binPath, 0755)
 
 			s.mu.Lock()
@@ -83,7 +85,7 @@ func (s *Supervisor) superviseProcess(ctx context.Context, wg *sync.WaitGroup, n
 		default:
 		}
 
-		s.logger.Log("SUPERVISOR", fmt.Sprintf("Launching native engine binary: %s", name))
+		s.logger.Log("SUPERVISOR", fmt.Sprintf("Executing routing binary: %s", name))
 		s.updateStatus(name, "RUNNING")
 
 		cmd := exec.CommandContext(ctx, binPath)
@@ -99,11 +101,10 @@ func (s *Supervisor) superviseProcess(ctx context.Context, wg *sync.WaitGroup, n
 
 		err = cmd.Wait()
 		if ctx.Err() != nil {
-			// Clean shutdown triggered
 			return
 		}
 
-		s.logger.Log("WARNING", fmt.Sprintf("Process %s died unexpectedly (%v). Auto-restarting...", name, err))
+		s.logger.Log("WARNING", fmt.Sprintf("Routing process %s exited (%v). Auto-restarting...", name, err))
 		s.incrementRestart(name)
 		s.updateStatus(name, "CRASHED_RESTARTING")
 		time.Sleep(2 * time.Second)
