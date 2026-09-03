@@ -56,7 +56,7 @@ public class AikuForegroundService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        Notification notification = buildNotification("Aiku Service Engine Active (Debugging)");
+        Notification notification = buildNotification("Aiku Core Active | Routing 127.0.0.3:2007");
         startForeground(1001, notification);
 
         if (!isRunning) {
@@ -70,26 +70,32 @@ public class AikuForegroundService extends Service {
     private void startDaemonSupervisor() {
         supervisorThread = new Thread(() -> {
             File rootDir = getFilesDir();
-            appendLog("INIT", "Sandbox target: " + rootDir.getAbsolutePath());
+            appendLog("INIT", "Target sandbox root: " + rootDir.getAbsolutePath());
 
-            // 1. Ekstrak Semua File
+            // 1. Ekstrak aset ke target root
             extractAssetsFlat(rootDir);
 
-            // 2. Chmod Eksekusi
-            enforcePermissions(rootDir);
-
+            // 2. Chmod hanya untuk binary
             File daemonBin = new File(rootDir, "aiku-daemon");
             File cobaBin = new File(rootDir, "coba");
 
-            appendLog("CHECK", "aiku-daemon: " + (daemonBin.exists() ? "OK (" + daemonBin.length() + " bytes)" : "MISSING"));
-            appendLog("CHECK", "coba: " + (cobaBin.exists() ? "OK (" + cobaBin.length() + " bytes)" : "MISSING"));
+            daemonBin.setExecutable(true, false);
+            cobaBin.setExecutable(true, false);
+
+            try {
+                Runtime.getRuntime().exec("chmod 755 " + daemonBin.getAbsolutePath()).waitFor();
+                Runtime.getRuntime().exec("chmod 755 " + cobaBin.getAbsolutePath()).waitFor();
+            } catch (Exception ignored) {}
+
+            appendLog("CHECK", "aiku-daemon: " + (daemonBin.exists() ? "OK (" + daemonBin.length() + "B)" : "MISSING"));
+            appendLog("CHECK", "coba: " + (cobaBin.exists() ? "OK (" + cobaBin.length() + "B)" : "MISSING"));
             appendLog("CHECK", ".env: " + (new File(rootDir, ".env").exists() ? "OK" : "MISSING"));
             appendLog("CHECK", "state.json: " + (new File(rootDir, "state.json").exists() ? "OK" : "MISSING"));
             appendLog("CHECK", "brain.dat: " + (new File(rootDir, "brain.dat").exists() ? "OK" : "MISSING"));
 
             while (isRunning) {
                 try {
-                    appendLog("EXEC", "Spawning aiku-daemon process...");
+                    appendLog("EXEC", "Spawning aiku-daemon supervisor...");
                     ProcessBuilder pb = new ProcessBuilder(daemonBin.getAbsolutePath());
                     pb.directory(rootDir);
 
@@ -107,9 +113,9 @@ public class AikuForegroundService extends Service {
                     }
 
                     int exitCode = daemonProcess.waitFor();
-                    appendLog("WARN", "aiku-daemon stopped with exit code " + exitCode + ". Restarting in 2s...");
+                    appendLog("WARN", "Supervisor exited (" + exitCode + "). Restarting in 2s...");
                 } catch (Exception e) {
-                    appendLog("ERROR", "Execution failed: " + e.getMessage());
+                    appendLog("ERROR", "Daemon process failed: " + e.getMessage());
                 }
 
                 if (isRunning) {
@@ -120,27 +126,6 @@ public class AikuForegroundService extends Service {
             }
         });
         supervisorThread.start();
-    }
-
-    private void enforcePermissions(File file) {
-        if (!file.exists()) return;
-
-        file.setReadable(true, false);
-        file.setWritable(true, false);
-        file.setExecutable(true, false);
-
-        if (file.isDirectory()) {
-            File[] children = file.listFiles();
-            if (children != null) {
-                for (File child : children) {
-                    enforcePermissions(child);
-                }
-            }
-        }
-
-        try {
-            Runtime.getRuntime().exec("chmod 777 " + file.getAbsolutePath()).waitFor();
-        } catch (Exception ignored) {}
     }
 
     private void extractAssetsFlat(File targetDir) {
@@ -165,7 +150,7 @@ public class AikuForegroundService extends Service {
                 }
             }
         } catch (Exception e) {
-            appendLog("ASSET_ERR", "Failed on " + assetSubDir + ": " + e.getMessage());
+            appendLog("ASSET_ERR", "Extract error " + assetSubDir + ": " + e.getMessage());
         }
     }
 
@@ -179,7 +164,8 @@ public class AikuForegroundService extends Service {
                 out.write(buffer, 0, read);
             }
             out.flush();
-            outFile.setExecutable(true, false);
+            outFile.setReadable(true, false);
+            outFile.setWritable(true, false);
         } catch (Exception e) {
             appendLog("COPY_ERR", assetPath + ": " + e.getMessage());
         }

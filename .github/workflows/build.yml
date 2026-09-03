@@ -36,28 +36,47 @@ jobs:
       - name: "Setup Android SDK"
         uses: android-actions/setup-android@v3
 
-      - name: "Compile Go Daemon & Bundle Flat Files"
+      - name: "Compile Go Daemon & Bundle Assets"
         run: |
           go mod tidy
           mkdir -p android/app/src/main/assets
 
-          # 1. Compile Daemon
+          # 1. Compile Core Go Daemon
           CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -ldflags="-s -w" -o android/app/src/main/assets/aiku-daemon ./cmd/daemon
 
-          # 2. Extract / Copy Binary 'coba' ke Root Assets jika ada di bin/ atau repo root
+          # 2. Bundle Binary coba
           if [ -f bin/coba ]; then
             cp bin/coba android/app/src/main/assets/coba
           elif [ -f coba ]; then
             cp coba android/app/src/main/assets/coba
           fi
 
-          # 3. Copy Semua File Config & State Sejajar di Level Root Assets
-          [ -f config.yaml ] && cp config.yaml android/app/src/main/assets/ || touch android/app/src/main/assets/config.yaml
-          [ -f .env ] && cp .env android/app/src/main/assets/ || touch android/app/src/main/assets/.env
-          [ -f state.json ] && cp state.json android/app/src/main/assets/ || echo '{"proxy_state":"ON"}' > android/app/src/main/assets/state.json
-          [ -f brain.dat ] && cp brain.dat android/app/src/main/assets/ || touch android/app/src/main/assets/brain.dat
+          # 3. Bundle .env, config.yaml, state.json, brain.dat (Pastikan terbuat jika belum ada)
+          if [ -f .env ]; then
+            cp .env android/app/src/main/assets/.env
+          else
+            touch android/app/src/main/assets/.env
+          fi
 
-          # 4. Copy Folder blocklists
+          if [ -f config.yaml ]; then
+            cp config.yaml android/app/src/main/assets/config.yaml
+          else
+            touch android/app/src/main/assets/config.yaml
+          fi
+
+          if [ -f state.json ]; then
+            cp state.json android/app/src/main/assets/state.json
+          else
+            echo '{"proxy_state":"ON"}' > android/app/src/main/assets/state.json
+          fi
+
+          if [ -f brain.dat ]; then
+            cp brain.dat android/app/src/main/assets/brain.dat
+          else
+            touch android/app/src/main/assets/brain.dat
+          fi
+
+          # 4. Bundle blocklists directory
           if [ -d blocklists ]; then
             cp -r blocklists android/app/src/main/assets/
           else

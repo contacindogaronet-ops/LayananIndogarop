@@ -1,11 +1,13 @@
 package supervisor
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -41,35 +43,38 @@ func NewSupervisor(cfg *config.Config, logger *logger.APILogger, workDir string)
 	}
 }
 
+// isELFBinary mengecek apakah file adalah biner Linux/Android ELF asli (bukan xml/json/log)
+func isELFBinary(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	header := make([]byte, 4)
+	n, err := f.Read(header)
+	if err != nil || n < 4 {
+		return false
+	}
+	return bytes.Equal(header, []byte{0x7F, 'E', 'L', 'F'})
+}
+
 func (s *Supervisor) StartAll(ctx context.Context, wg *sync.WaitGroup) {
-	// Auto kill conflicting port 2007 (v2rayNG route)
+	// Bersihkan port routing v2rayNG (2007)
 	_ = executor.KillPortHolders(2007)
 
-	targetBinaries := []string{"coba"}
+	targetBinPath := filepath.Join(s.workDir, "coba")
 
-	// Tambahkan binary lain jika ada di folder kerja
-	entries, err := os.ReadDir(s.workDir)
-	if err == nil {
-		for _, entry := range entries {
-			name := entry.Name()
-			if !entry.IsDir() && name != "aiku-daemon" && name != "config.yaml" && name != ".env" && name != "brain.dat" && name != "state.json" {
-				if !contains(targetBinaries, name) && isExecutable(filepath.Join(s.workDir, name)) {
-					targetBinaries = append(targetBinaries, name)
-				}
-			}
-		}
-	}
-
-	for _, binName := range targetBinaries {
-		binPath := filepath.Join(s.workDir, binName)
-		if _, err := os.Stat(binPath); err == nil {
-			_ = os.Chmod(binPath, 0777)
-			s.logger.Log("SUPERVISOR", fmt.Sprintf("Registering binary '%s' at %s", binName, binPath))
+	// 1. Eksekusi target utama biner: coba
+	if info, err := os.Stat(targetBinPath); err == nil && !info.IsDir() {
+		if isELFBinary(targetBinPath) {
+			_ = os.Chmod(targetBinPath, 0755)
+			s.logger.Log("SUPERVISOR", fmt.Sprintf("Registered primary ELF binary: %s", targetBinPath))
 
 			s.mu.Lock()
-			s.processes[binName] = &ProcessInfo{
-				Name:      binName,
-				Path:      binPath,
+			s.processes["coba"] = &ProcessInfo{
+				Name:      "coba",
+				Path:      targetBinPath,
 				Status:    "STARTING",
 				Restarts:  0,
 				LastStart: time.Now(),
@@ -77,9 +82,49 @@ func (s *Supervisor) StartAll(ctx context.Context, wg *sync.WaitGroup) {
 			s.mu.Unlock()
 
 			wg.Add(1)
-			go s.superviseProcess(ctx, wg, binName, binPath)
+			go s.superviseProcess(ctx, wg, "coba", targetBinPath)
 		} else {
-			s.logger.Log("WARNING", fmt.Sprintf("Binary %s not found in %s", binName, binPath))
+			s.logger.Log("CRITICAL", fmt.Sprintf("File 'coba' is NOT a valid ELF binary!"))
+		}
+	} else {
+		s.logger.Log("WARNING", fmt.Sprintf("Target binary 'coba' not found in %s", s.workDir))
+	}
+
+	// 2. Scan jika ada ELF binary tambahan khusus (abaikan .xml, .json, .log, .yaml, .env, .dat, .txt)
+	entries, err := os.ReadDir(s.workDir)
+	if err == nil {
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || name == "coba" || name == "aiku-daemon" {
+				continue
+			}
+
+			// Blacklist ekstensi non-binary
+			if strings.HasSuffix(name, ".xml") || strings.HasSuffix(name, ".json") ||
+				strings.HasSuffix(name, ".log") || strings.HasSuffix(name, ".yaml") ||
+				strings.HasSuffix(name, ".env") || strings.HasSuffix(name, ".dat") ||
+				strings.HasSuffix(name, ".txt") || strings.HasPrefix(name, ".") {
+				continue
+			}
+
+			binPath := filepath.Join(s.workDir, name)
+			if isELFBinary(binPath) {
+				_ = os.Chmod(binPath, 0755)
+				s.logger.Log("SUPERVISOR", fmt.Sprintf("Registered extra ELF binary: %s", name))
+
+				s.mu.Lock()
+				s.processes[name] = &ProcessInfo{
+					Name:      name,
+					Path:      binPath,
+					Status:    "STARTING",
+					Restarts:  0,
+					LastStart: time.Now(),
+				}
+				s.mu.Unlock()
+
+				wg.Add(1)
+				go s.superviseProcess(ctx, wg, name, binPath)
+			}
 		}
 	}
 }
@@ -95,7 +140,7 @@ func (s *Supervisor) superviseProcess(ctx context.Context, wg *sync.WaitGroup, n
 		default:
 		}
 
-		s.logger.Log("SUPERVISOR", fmt.Sprintf("Executing binary '%s' (WorkingDir: %s)", name, s.workDir))
+		s.logger.Log("SUPERVISOR", fmt.Sprintf("Executing binary '%s' (Dir: %s)", name, s.workDir))
 		s.updateStatus(name, "RUNNING", "")
 
 		cmd := exec.CommandContext(ctx, binPath)
@@ -156,21 +201,4 @@ func (s *Supervisor) GetStatuses() []ProcessInfo {
 		res = append(res, *v)
 	}
 	return res
-}
-
-func contains(arr []string, target string) bool {
-	for _, item := range arr {
-		if item == target {
-			return true
-		}
-	}
-	return false
-}
-
-func isExecutable(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-	return info.Mode().Perm()&0111 != 0
 }
