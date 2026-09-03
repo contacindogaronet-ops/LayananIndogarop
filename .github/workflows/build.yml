@@ -1,0 +1,86 @@
+name: Build & Bundle Aiku Daemon
+
+on:
+  push:
+    branches: [ "main" ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-package:
+    name: Cross-Compile & Package Bundle
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Source Code
+      uses: actions/checkout@v4
+
+    - name: Setup Go Environment
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+        cache: true
+
+    - name: Create Structure & Build Binaries for Termux (Android ARM64)
+      run: |
+        mkdir -p dist/android-arm64/bin
+
+        # 1. Compile Main Daemon for Android ARM64 (Termux)
+        CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -ldflags="-s -w" -o dist/android-arm64/aiku-daemon cmd/daemon/main.go
+
+        # 2. Copy Configuration & Supporting Files/Folders
+        cp config.yaml dist/android-arm64/
+        [ -f helper_file_1.json ] && cp helper_file_1.json dist/android-arm64/ || touch dist/android-arm64/helper_file_1.json
+        [ -f helper_file_2.conf ] && cp helper_file_2.conf dist/android-arm64/ || touch dist/android-arm64/helper_file_2.conf
+        [ -f helper_file_3.txt ]  && cp helper_file_3.txt  dist/android-arm64/ || touch dist/android-arm64/helper_file_3.txt
+
+        if [ -d helper_data ]; then
+          cp -r helper_data dist/android-arm64/
+        else
+          mkdir -p dist/android-arm64/helper_data
+        fi
+
+        # 3. Copy Binaries into dist/android-arm64/bin
+        if [ -d bin ]; then
+          cp -r bin/* dist/android-arm64/bin/ 2>/dev/null || true
+        fi
+
+        # 4. Include Termux Monitor Script
+        mkdir -p dist/android-arm64/scripts
+        cp scripts/termux_monitor.sh dist/android-arm64/scripts/
+        chmod +x dist/android-arm64/scripts/termux_monitor.sh
+
+    - name: Create Structure & Build Binaries for Linux AMD64
+      run: |
+        mkdir -p dist/linux-amd64/bin
+        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/linux-amd64/aiku-daemon cmd/daemon/main.go
+        cp config.yaml dist/linux-amd64/
+        [ -f helper_file_1.json ] && cp helper_file_1.json dist/linux-amd64/ || touch dist/linux-amd64/helper_file_1.json
+        [ -f helper_file_2.conf ] && cp helper_file_2.conf dist/linux-amd64/ || touch dist/linux-amd64/helper_file_2.conf
+        [ -f helper_file_3.txt ]  && cp helper_file_3.txt  dist/linux-amd64/ || touch dist/linux-amd64/helper_file_3.txt
+
+        if [ -d helper_data ]; then
+          cp -r helper_data dist/linux-amd64/
+        else
+          mkdir -p dist/linux-amd64/helper_data
+        fi
+
+        if [ -d bin ]; then
+          cp -r bin/* dist/linux-amd64/bin/ 2>/dev/null || true
+        fi
+
+    - name: Compress Release Packages
+      run: |
+        cd dist
+        tar -czvf aiku-daemon-termux-arm64.tar.gz android-arm64/
+        tar -czvf aiku-daemon-linux-amd64.tar.gz linux-amd64/
+
+    - name: Upload Build Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: aiku-daemon-packages
+        path: |
+          dist/aiku-daemon-termux-arm64.tar.gz
+          dist/aiku-daemon-linux-amd64.tar.gz

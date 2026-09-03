@@ -1,0 +1,22 @@
+server:
+  port: 8088
+  host: "0.0.0.0"
+
+supervisor:
+  auto_restart: true
+  restart_delay_seconds: 2
+
+# Daftarkan binary di folder ./bin yang ingin dibangkitkan
+binaries:
+  - name: "coba"
+    enabled: true
+    args: ["--mode=production", "--verbose"]
+    env:
+      APP_ENV: "production"
+      LOG_LEVEL: "info"
+
+  - name: "telemetry_service"
+    enabled: true
+    args: []
+    env:
+      SYNC_INTERVAL: "10s"
