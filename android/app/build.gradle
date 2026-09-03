@@ -9,13 +9,13 @@ android {
     defaultConfig {
         applicationId "com.aiku.daemon"
         minSdk 21
-        targetSdk 34
+        targetSdk 28 // Wajib 28 agar Android 10-14 mengizinkan eksekusi binary langsung dari filesDir
         versionCode 1
         versionName "1.0.0"
     }
 
     androidResources {
-        noCompress 'txt', 'dat', 'json', 'yaml', 'env'
+        noCompress 'txt', 'dat', 'json', 'yaml', 'env', 'so'
     }
 
     buildTypes {
