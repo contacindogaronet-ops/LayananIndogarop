@@ -4,11 +4,13 @@ on:
   push:
     branches:
       - "master"
+      - "main"
     tags:
       - "v*"
   pull_request:
     branches:
       - "master"
+      - "main"
 
 jobs:
   build-and-package:
@@ -24,6 +26,10 @@ jobs:
         with:
           go-version: "1.22"
           cache: true
+
+      - name: "Download & Tidy Dependencies"
+        run: |
+          go mod tidy
 
       - name: "Create Structure & Build Binaries for Termux (Android ARM64)"
         run: |
@@ -99,4 +105,3 @@ jobs:
           path: |
             dist/aiku-daemon-termux-arm64.tar.gz
             dist/aiku-daemon-linux-amd64.tar.gz
-# trigger action
