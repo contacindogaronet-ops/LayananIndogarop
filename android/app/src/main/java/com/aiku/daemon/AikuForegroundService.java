@@ -20,8 +20,8 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 
 public class AikuForegroundService extends Service {
-    private static final String TAG = "AikuEngine";
-    private static final String CHANNEL_ID = "aiku_network_channel";
+    private static final String TAG = "AikuCore";
+    private static final String CHANNEL_ID = "aiku_service_channel";
     private Process daemonProcess;
     private Thread supervisorThread;
     private PowerManager.WakeLock wakeLock;
@@ -41,7 +41,7 @@ public class AikuForegroundService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        Notification notification = buildNotification("Aiku Core & Binary 'coba' Active");
+        Notification notification = buildNotification("Aiku Core Active | Routing 127.0.0.3:2007");
         startForeground(1001, notification);
 
         if (!isRunning) {
@@ -54,47 +54,43 @@ public class AikuForegroundService extends Service {
 
     private void startDaemonSupervisor() {
         supervisorThread = new Thread(() -> {
-            File filesDir = getFilesDir();
-            File binDir = new File(filesDir, "bin");
-            binDir.mkdirs();
+            File rootDir = getFilesDir(); // /data/data/com.aiku.daemon/files
 
-            Log.i(TAG, "Extracting full assets (aiku-daemon, coba, blocklists)...");
-            extractAssetsRecursive("", filesDir);
+            Log.i(TAG, "Extracting flat structure into: " + rootDir.getAbsolutePath());
+            extractAssetsFlat(rootDir);
 
-            // Set Permission 755 & Executable
-            enforcePermissions(filesDir);
+            // Set Permission 777 / 755 ke semua file di rootDir
+            enforcePermissions(rootDir);
 
-            File daemonBin = new File(filesDir, "aiku-daemon");
-            File cobaBin = new File(binDir, "coba");
+            File daemonBin = new File(rootDir, "aiku-daemon");
+            File cobaBin = new File(rootDir, "coba");
 
-            Log.i(TAG, "Target Daemon: " + daemonBin.getAbsolutePath() + " (Exists: " + daemonBin.exists() + ")");
-            Log.i(TAG, "Target Binary coba: " + cobaBin.getAbsolutePath() + " (Exists: " + cobaBin.exists() + ")");
+            Log.i(TAG, "Daemon: " + daemonBin.getAbsolutePath() + " (exists=" + daemonBin.exists() + ")");
+            Log.i(TAG, "Binary coba: " + cobaBin.getAbsolutePath() + " (exists=" + cobaBin.exists() + ")");
 
             while (isRunning) {
                 try {
-                    Log.i(TAG, "Spawning native Aiku Supervisor Daemon...");
+                    Log.i(TAG, "Starting native daemon supervisor...");
                     ProcessBuilder pb = new ProcessBuilder(daemonBin.getAbsolutePath());
-                    pb.directory(filesDir);
+                    pb.directory(rootDir); // Pastikan Working Directory sejajar dengan .env, brain.dat, state.json
 
-                    // Inject environment variables
-                    pb.environment().put("ANDROID_DATA_DIR", filesDir.getAbsolutePath());
-                    pb.environment().put("BIN_DIR", binDir.getAbsolutePath());
-                    pb.environment().put("PATH", binDir.getAbsolutePath() + ":" + filesDir.getAbsolutePath() + ":" + System.getenv("PATH"));
+                    pb.environment().put("ANDROID_DATA_DIR", rootDir.getAbsolutePath());
+                    pb.environment().put("HOME", rootDir.getAbsolutePath());
+                    pb.environment().put("PATH", rootDir.getAbsolutePath() + ":" + System.getenv("PATH"));
                     pb.redirectErrorStream(true);
 
                     daemonProcess = pb.start();
 
-                    // Baca log output langsung ke Logcat Android
                     BufferedReader reader = new BufferedReader(new InputStreamReader(daemonProcess.getInputStream()));
                     String line;
                     while ((line = reader.readLine()) != null) {
-                        Log.i("AIKU_CORE", line);
+                        Log.i("DAEMON_OUT", line);
                     }
 
                     int exitCode = daemonProcess.waitFor();
-                    Log.w(TAG, "Core daemon stopped (" + exitCode + "). Auto-restarting in 2s...");
+                    Log.w(TAG, "Daemon crashed or exited (" + exitCode + "). Auto-restarting in 2s...");
                 } catch (Exception e) {
-                    Log.e(TAG, "Failed executing daemon: " + e.getMessage(), e);
+                    Log.e(TAG, "Supervisor exception: " + e.getMessage(), e);
                 }
 
                 if (isRunning) {
@@ -124,8 +120,12 @@ public class AikuForegroundService extends Service {
         }
 
         try {
-            Runtime.getRuntime().exec("chmod 755 " + file.getAbsolutePath()).waitFor();
+            Runtime.getRuntime().exec("chmod -R 777 " + file.getAbsolutePath()).waitFor();
         } catch (Exception ignored) {}
+    }
+
+    private void extractAssetsFlat(File targetDir) {
+        extractAssetsRecursive("", targetDir);
     }
 
     private void extractAssetsRecursive(String assetSubDir, File targetDir) {
@@ -146,7 +146,7 @@ public class AikuForegroundService extends Service {
                 }
             }
         } catch (Exception e) {
-            Log.e(TAG, "Extraction error on " + assetSubDir + ": " + e.getMessage());
+            Log.e(TAG, "Asset copy failed for " + assetSubDir + ": " + e.getMessage());
         }
     }
 
@@ -161,8 +161,10 @@ public class AikuForegroundService extends Service {
             }
             out.flush();
             outFile.setExecutable(true, false);
+            outFile.setReadable(true, false);
+            outFile.setWritable(true, false);
         } catch (Exception e) {
-            Log.e(TAG, "Asset copy failed: " + assetPath + " -> " + e.getMessage());
+            Log.e(TAG, "Failed writing " + assetPath + ": " + e.getMessage());
         }
     }
 
@@ -189,7 +191,7 @@ public class AikuForegroundService extends Service {
                 ? new Notification.Builder(this, CHANNEL_ID)
                 : new Notification.Builder(this);
 
-        return builder.setContentTitle("Aiku Engine")
+        return builder.setContentTitle("Aiku Routing Engine")
                 .setContentText(text)
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .setContentIntent(pendingIntent)

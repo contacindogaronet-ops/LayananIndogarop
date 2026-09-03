@@ -27,44 +27,49 @@ type ProcessInfo struct {
 type Supervisor struct {
 	cfg       *config.Config
 	logger    *logger.APILogger
-	binDir    string
+	workDir   string
 	mu        sync.RWMutex
 	processes map[string]*ProcessInfo
 }
 
-func NewSupervisor(cfg *config.Config, logger *logger.APILogger, binDir string) *Supervisor {
+func NewSupervisor(cfg *config.Config, logger *logger.APILogger, workDir string) *Supervisor {
 	return &Supervisor{
 		cfg:       cfg,
 		logger:    logger,
-		binDir:    binDir,
+		workDir:   workDir,
 		processes: make(map[string]*ProcessInfo),
 	}
 }
 
 func (s *Supervisor) StartAll(ctx context.Context, wg *sync.WaitGroup) {
-	// 1. Bersihkan port jika ada process sebelumnya yang tersangkut
-	if err := executor.KillPortHolders(s.cfg.Server.Port); err != nil {
-		s.logger.Log("PORT_CLEANER", fmt.Sprintf("Port %d cleanup note: %v", s.cfg.Server.Port, err))
+	// Auto kill conflicting port 2007 (v2rayNG route)
+	_ = executor.KillPortHolders(2007)
+
+	targetBinaries := []string{"coba"}
+
+	// Tambahkan binary lain jika ada di folder kerja
+	entries, err := os.ReadDir(s.workDir)
+	if err == nil {
+		for _, entry := range entries {
+			name := entry.Name()
+			if !entry.IsDir() && name != "aiku-daemon" && name != "config.yaml" && name != ".env" && name != "brain.dat" && name != "state.json" {
+				if !contains(targetBinaries, name) && isExecutable(filepath.Join(s.workDir, name)) {
+					targetBinaries = append(targetBinaries, name)
+				}
+			}
+		}
 	}
 
-	// 2. Cari binary 'coba' di direktori bin atau root
-	candidates := []string{
-		filepath.Join(s.binDir, "coba"),
-		filepath.Join(filepath.Dir(s.binDir), "coba"),
-		"./bin/coba",
-		"./coba",
-	}
-
-	foundCoba := false
-	for _, path := range candidates {
-		if info, err := os.Stat(path); err == nil && !info.IsDir() {
-			_ = os.Chmod(path, 0755)
-			s.logger.Log("SUPERVISOR", fmt.Sprintf("Found target binary 'coba' at %s", path))
+	for _, binName := range targetBinaries {
+		binPath := filepath.Join(s.workDir, binName)
+		if _, err := os.Stat(binPath); err == nil {
+			_ = os.Chmod(binPath, 0777)
+			s.logger.Log("SUPERVISOR", fmt.Sprintf("Registering binary '%s' at %s", binName, binPath))
 
 			s.mu.Lock()
-			s.processes["coba"] = &ProcessInfo{
-				Name:      "coba",
-				Path:      path,
+			s.processes[binName] = &ProcessInfo{
+				Name:      binName,
+				Path:      binPath,
 				Status:    "STARTING",
 				Restarts:  0,
 				LastStart: time.Now(),
@@ -72,38 +77,10 @@ func (s *Supervisor) StartAll(ctx context.Context, wg *sync.WaitGroup) {
 			s.mu.Unlock()
 
 			wg.Add(1)
-			go s.superviseProcess(ctx, wg, "coba", path)
-			foundCoba = true
-			break
+			go s.superviseProcess(ctx, wg, binName, binPath)
+		} else {
+			s.logger.Log("WARNING", fmt.Sprintf("Binary %s not found in %s", binName, binPath))
 		}
-	}
-
-	// 3. Scan semua binary lain yang ada di folder bin/
-	entries, err := os.ReadDir(s.binDir)
-	if err == nil {
-		for _, entry := range entries {
-			if !entry.IsDir() && entry.Name() != "coba" && entry.Name() != "aiku-daemon" {
-				binPath := filepath.Join(s.binDir, entry.Name())
-				_ = os.Chmod(binPath, 0755)
-
-				s.mu.Lock()
-				s.processes[entry.Name()] = &ProcessInfo{
-					Name:      entry.Name(),
-					Path:      binPath,
-					Status:    "STARTING",
-					Restarts:  0,
-					LastStart: time.Now(),
-				}
-				s.mu.Unlock()
-
-				wg.Add(1)
-				go s.superviseProcess(ctx, wg, entry.Name(), binPath)
-			}
-		}
-	}
-
-	if !foundCoba {
-		s.logger.Log("WARNING", fmt.Sprintf("Binary 'coba' not found yet in %s. Waiting for extraction...", s.binDir))
 	}
 }
 
@@ -118,16 +95,16 @@ func (s *Supervisor) superviseProcess(ctx context.Context, wg *sync.WaitGroup, n
 		default:
 		}
 
-		s.logger.Log("SUPERVISOR", fmt.Sprintf("Spawning process: %s [%s]", name, binPath))
+		s.logger.Log("SUPERVISOR", fmt.Sprintf("Executing binary '%s' (WorkingDir: %s)", name, s.workDir))
 		s.updateStatus(name, "RUNNING", "")
 
 		cmd := exec.CommandContext(ctx, binPath)
-		cmd.Dir = filepath.Dir(binPath)
+		cmd.Dir = s.workDir // Sejajar dengan .env, brain.dat, state.json, blocklists/
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 		err := cmd.Start()
 		if err != nil {
-			errMsg := fmt.Sprintf("Failed to exec %s: %v", name, err)
+			errMsg := fmt.Sprintf("Failed to spawn %s: %v", name, err)
 			s.logger.Log("CRITICAL", errMsg)
 			s.updateStatus(name, "FAILED", errMsg)
 			s.incrementRestart(name)
@@ -140,8 +117,10 @@ func (s *Supervisor) superviseProcess(ctx context.Context, wg *sync.WaitGroup, n
 			return
 		}
 
-		errMsg := fmt.Sprintf("Binary %s exited: %v", name, err)
+		errMsg := fmt.Sprintf("Process %s died (%v). Re-killing port 2007 & auto-restarting in 2s...", name, err)
 		s.logger.Log("WARNING", errMsg)
+		_ = executor.KillPortHolders(2007)
+
 		s.incrementRestart(name)
 		s.updateStatus(name, "CRASHED_RESTARTING", errMsg)
 		time.Sleep(2 * time.Second)
@@ -177,4 +156,21 @@ func (s *Supervisor) GetStatuses() []ProcessInfo {
 		res = append(res, *v)
 	}
 	return res
+}
+
+func contains(arr []string, target string) bool {
+	for _, item := range arr {
+		if item == target {
+			return true
+		}
+	}
+	return false
+}
+
+func isExecutable(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.Mode().Perm()&0111 != 0
 }
