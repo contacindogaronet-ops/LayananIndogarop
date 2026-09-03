@@ -1,89 +1,87 @@
-name: Build & Bundle Aiku Daemon
+name: "Build and Bundle Aiku Daemon"
 
 on:
   push:
     branches: [ "master" ]
-    tags:
-      - 'v*'
+    tags:                                                                                              - 'v*'
   pull_request:
     branches: [ "master" ]
 
 jobs:
-  build-and-package:
-    name: Cross-Compile & Package Bundle                                                             runs-on: ubuntu-latest
+  build-and-package:                                                                                 name: "Cross Compile and Package Bundle"
+    runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout Source Code                                                                       uses: actions/checkout@v4
+      - name: "Checkout Source Code"
+        uses: actions/checkout@v4
 
-    - name: Setup Go Environment                                                                       uses: actions/setup-go@v5
-      with:
-        go-version: '1.22'
-        cache: true
+      - name: "Setup Go Environment"
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
 
-    - name: Create Structure & Build Binaries for Termux (Android ARM64)
-      run: |
-        mkdir -p dist/android-arm64/bin
+      - name: "Create Structure & Build Binaries for Termux (Android ARM64)"
+        run: |
+          mkdir -p dist/android-arm64/bin
 
-        # Target package directory ./cmd/daemon
-        TARGET_PKG="./cmd/daemon"
-        if [ ! -d "$TARGET_PKG" ]; then
-          TARGET_PKG="."
-        fi
+          TARGET_PKG="./cmd/daemon"
+          if [ ! -d "$TARGET_PKG" ]; then
+            TARGET_PKG="."
+          fi
 
-        # 1. Compile Main Daemon for Android ARM64 (Termux)
-        CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -ldflags="-s -w" -o dist/android-arm64/aiku-daemon $TARGET_PKG
+          # 1. Compile Main Daemon for Android ARM64 (Termux)
+          CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -ldflags="-s -w" -o dist/android-arm64/aiku-daemon $TARGET_PKG
+                                                                                                           # 2. Copy Configuration & Supporting Files/Folders                                               cp config.yaml dist/android-arm64/
+          [ -f .env ] && cp .env dist/android-arm64/ || touch dist/android-arm64/.env
+          [ -f state.json ] && cp state.json dist/android-arm64/ || touch dist/android-arm64/state.json                                                                                                     [ -f brain.dat ]  && cp brain.dat  dist/android-arm64/ || touch dist/android-arm64/brain.dat
 
-        # 2. Copy Configuration & Supporting Files/Folders
-        cp config.yaml dist/android-arm64/
-        [ -f .env ] && cp .env dist/android-arm64/ || touch dist/android-arm64/.env
-        [ -f state.json ] && cp state.json dist/android-arm64/ || touch dist/android-arm64/state.json
-        [ -f brain.dat ]  && cp brain.dat  dist/android-arm64/ || touch dist/android-arm64/brain.dat
+          if [ -d blocklists ]; then
+            cp -r blocklists dist/android-arm64/
+          else
+            mkdir -p dist/android-arm64/blocklists                                                         fi                                                                                                                                                                                                # 3. Copy Binaries into dist/android-arm64/bin
+          if [ -d bin ]; then
+            cp -r bin/* dist/android-arm64/bin/ 2>/dev/null || true                                        fi
 
-        if [ -d blocklists ]; then
-          cp -r blocklists dist/android-arm64/
-        else
-          mkdir -p dist/android-arm64/blocklists
-        fi
+          # 4. Include Termux Monitor Script
+          mkdir -p dist/android-arm64/scripts
+          [ -f scripts/termux_monitor.sh ] && cp scripts/termux_monitor.sh dist/android-arm64/scripts/ || true
+          chmod +x dist/android-arm64/scripts/*.sh 2>/dev/null || true                           
+      - name: "Create Structure & Build Binaries for Linux AMD64"
+        run: |
+          mkdir -p dist/linux-amd64/bin
 
-        # 3. Copy Binaries into dist/android-arm64/bin
-        if [ -d bin ]; then
-          cp -r bin/* dist/android-arm64/bin/ 2>/dev/null || true
-        fi                                                                                       
-        # 4. Include Termux Monitor Script
-        mkdir -p dist/android-arm64/scripts
-        [ -f scripts/termux_monitor.sh ] && cp scripts/termux_monitor.sh dist/android-arm64/scripts/ || true                                                                                              chmod +x dist/android-arm64/scripts/*.sh 2>/dev/null || true
-                                                                                                     - name: Create Structure & Build Binaries for Linux AMD64
-      run: |                                                                                             mkdir -p dist/linux-amd64/bin
+          TARGET_PKG="./cmd/daemon"
+          if [ ! -d "$TARGET_PKG" ]; then
+            TARGET_PKG="."
+          fi
 
-        TARGET_PKG="./cmd/daemon"
-        if [ ! -d "$TARGET_PKG" ]; then
-          TARGET_PKG="."
-        fi
+          # Compile Main Daemon for Linux AMD64
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/linux-amd64/aiku-daemon $TARGET_PKG
 
-        # Compile Main Daemon for Linux AMD64
-        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/linux-amd64/aiku-daemon $TARGET_PKG
+          cp config.yaml dist/linux-amd64/
+          [ -f .env ] && cp .env dist/linux-amd64/ || touch dist/linux-amd64/.env
+          [ -f state.json ] && cp state.json dist/linux-amd64/ || touch dist/linux-amd64/state.json
+          [ -f brain.dat ]  && cp brain.dat  dist/linux-amd64/ || touch dist/linux-amd64/brain.dat
 
-        cp config.yaml dist/linux-amd64/
-        [ -f .env ] && cp .env dist/linux-amd64/ || touch dist/linux-amd64/.env
-        [ -f state.json ] && cp state.json dist/linux-amd64/ || touch dist/linux-amd64/state.json
-        [ -f brain.dat ]  && cp brain.dat  dist/linux-amd64/ || touch dist/linux-amd64/brain.dat
+          if [ -d blocklists ]; then
+            cp -r blocklists dist/linux-amd64/
+          else
+            mkdir -p dist/linux-amd64/blocklists
+          fi
 
-        if [ -d blocklists ]; then
-          cp -r blocklists dist/linux-amd64/
-        else
-          mkdir -p dist/linux-amd64/blocklists
-        fi
-                                                                                                         if [ -d bin ]; then
-          cp -r bin/* dist/linux-amd64/bin/ 2>/dev/null || true
-        fi                                                                                       
-    - name: Compress Release Packages                                                                  run: |
-        cd dist                                                                                          tar -czvf aiku-daemon-termux-arm64.tar.gz android-arm64/
-        tar -czvf aiku-daemon-linux-amd64.tar.gz linux-amd64/
+          if [ -d bin ]; then
+            cp -r bin/* dist/linux-amd64/bin/ 2>/dev/null || true
+          fi
 
-    - name: Upload Build Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: aiku-daemon-packages
-        path: |
-          dist/aiku-daemon-termux-arm64.tar.gz
-          dist/aiku-daemon-linux-amd64.tar.gz
+      - name: "Compress Release Packages"
+        run: |
+          cd dist
+          tar -czvf aiku-daemon-termux-arm64.tar.gz android-arm64/                                         tar -czvf aiku-daemon-linux-amd64.tar.gz linux-amd64/
+
+      - name: "Upload Build Artifacts"                                                                   uses: actions/upload-artifact@v4
+        with:
+          name: aiku-daemon-packages
+          path: |
+            dist/aiku-daemon-termux-arm64.tar.gz
+            dist/aiku-daemon-linux-amd64.tar.gz
