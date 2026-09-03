@@ -2,11 +2,11 @@ name: Build & Bundle Aiku Daemon
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "master" ]
     tags:
       - 'v*'
   pull_request:
-    branches: [ "main" ]
+    branches: [ "master" ]
 
 jobs:
   build-and-package:
@@ -32,14 +32,14 @@ jobs:
 
         # 2. Copy Configuration & Supporting Files/Folders
         cp config.yaml dist/android-arm64/
-        [ -f helper_file_1.json ] && cp helper_file_1.json dist/android-arm64/ || touch dist/android-arm64/helper_file_1.json
-        [ -f helper_file_2.conf ] && cp helper_file_2.conf dist/android-arm64/ || touch dist/android-arm64/helper_file_2.conf
-        [ -f helper_file_3.txt ]  && cp helper_file_3.txt  dist/android-arm64/ || touch dist/android-arm64/helper_file_3.txt
+        [ -f .env ] && cp .env dist/android-arm64/ || touch dist/android-arm64/.env
+        [ -f state.json] && cp state.json dist/android-arm64/ || touch dist/android-arm64/state.json
+        [ -f brain.dat ]  && cp brain.dat  dist/android-arm64/ || touch dist/android-arm64/brain.dat
 
-        if [ -d helper_data ]; then
-          cp -r helper_data dist/android-arm64/
+        if [ -d blocklists ]; then
+          cp -r blocklists dist/android-arm64/
         else
-          mkdir -p dist/android-arm64/helper_data
+          mkdir -p dist/android-arm64/blocklists
         fi
 
         # 3. Copy Binaries into dist/android-arm64/bin
@@ -57,12 +57,12 @@ jobs:
         mkdir -p dist/linux-amd64/bin
         CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/linux-amd64/aiku-daemon cmd/daemon/main.go
         cp config.yaml dist/linux-amd64/
-        [ -f helper_file_1.json ] && cp helper_file_1.json dist/linux-amd64/ || touch dist/linux-amd64/helper_file_1.json
-        [ -f helper_file_2.conf ] && cp helper_file_2.conf dist/linux-amd64/ || touch dist/linux-amd64/helper_file_2.conf
-        [ -f helper_file_3.txt ]  && cp helper_file_3.txt  dist/linux-amd64/ || touch dist/linux-amd64/helper_file_3.txt
+        [ -f .env ] && cp .env dist/Linux-amd64/ || touch dist/Linux-amd64/.env
+        [ -f state.json] && cp state.json dist/Linux-amd64/ || touch dist/Linux-amd64/state.json
+        [ -f brain.dat ]  && cp brain.dat  dist/Linux-amd64/ || touch dist/Linux-amd64/brain.dat
 
-        if [ -d helper_data ]; then
-          cp -r helper_data dist/linux-amd64/
+        if [ -d blocklists ]; then
+          cp -r bloclists/linux-amd64/
         else
           mkdir -p dist/linux-amd64/helper_data
         fi
