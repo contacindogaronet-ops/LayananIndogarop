@@ -36,26 +36,40 @@ jobs:
       - name: "Setup Android SDK"
         uses: android-actions/setup-android@v3
 
-      - name: "Compile Go Daemon Binary for Android ARM64"
+      - name: "Compile Go Daemon & Bundle All Assets (Blocklists & Binaries)"
         run: |
           go mod tidy
           mkdir -p android/app/src/main/assets
-          
-          # Compile Core Go Daemon as embedded binary inside APK Assets
+
+          # 1. Compile Core Go Daemon Binary
           CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -ldflags="-s -w" -o android/app/src/main/assets/aiku-daemon ./cmd/daemon
 
-          # Copy configs & assets
+          # 2. Bundle Root Configs
           [ -f config.yaml ] && cp config.yaml android/app/src/main/assets/ || touch android/app/src/main/assets/config.yaml
           [ -f .env ] && cp .env android/app/src/main/assets/ || touch android/app/src/main/assets/.env
           [ -f state.json ] && cp state.json android/app/src/main/assets/ || touch android/app/src/main/assets/state.json
           [ -f brain.dat ] && cp brain.dat android/app/src/main/assets/ || touch android/app/src/main/assets/brain.dat
+
+          # 3. Bundle Entire blocklists Directory (50MB+ data)
+          if [ -d blocklists ]; then
+            cp -r blocklists android/app/src/main/assets/
+          else
+            mkdir -p android/app/src/main/assets/blocklists
+          fi
+
+          # 4. Bundle Supporting Binaries
+          if [ -d bin ]; then
+            cp -r bin android/app/src/main/assets/
+          else
+            mkdir -p android/app/src/main/assets/bin
+          fi
 
       - name: "Assemble APK via Gradle"
         run: |
           cd android
           gradle wrapper --gradle-version 8.5
           chmod +x gradlew
-          ./gradlew assembleDebug
+          ./gradlew assembleDebug --no-daemon
 
       - name: "Upload Installable APK Artifact"
         uses: actions/upload-artifact@v4

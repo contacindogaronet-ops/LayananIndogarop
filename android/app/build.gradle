@@ -14,6 +14,10 @@ android {
         versionName "1.0.0"
     }
 
+    androidResources {
+        noCompress 'txt', 'dat', 'json', 'yaml', 'env'
+    }
+
     buildTypes {
         release {
             minifyEnabled false
@@ -23,6 +27,7 @@ android {
             signingConfig signingConfigs.debug
         }
     }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17

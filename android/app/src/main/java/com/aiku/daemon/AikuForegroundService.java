@@ -6,6 +6,7 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
+import android.content.res.AssetManager;
 import android.os.Build;
 import android.os.IBinder;
 import android.util.Log;
@@ -30,7 +31,7 @@ public class AikuForegroundService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        Notification notification = buildNotification("Aiku Daemon Active (Running in background)");
+        Notification notification = buildNotification("Aiku Engine Service Running");
         startForeground(1001, notification);
 
         if (!isRunning) {
@@ -38,7 +39,7 @@ public class AikuForegroundService extends Service {
             startDaemonSupervisor();
         }
 
-        return START_STICKY; // Auto restart jika dimatikan OS
+        return START_STICKY;
     }
 
     private void startDaemonSupervisor() {
@@ -46,13 +47,24 @@ public class AikuForegroundService extends Service {
             File filesDir = getFilesDir();
             File binFile = new File(filesDir, "aiku-daemon");
 
-            // Extract binary & configs dari APK assets
-            extractAssets(filesDir);
+            Log.i(TAG, "Extracting full assets bundle (configs, blocklists, bin)...");
+            extractAssetsRecursive("", filesDir);
+
+            // Grant executable permissions
             binFile.setExecutable(true, false);
+            File binDir = new File(filesDir, "bin");
+            if (binDir.exists() && binDir.isDirectory()) {
+                File[] subBins = binDir.listFiles();
+                if (subBins != null) {
+                    for (File f : subBins) {
+                        f.setExecutable(true, false);
+                    }
+                }
+            }
 
             while (isRunning) {
                 try {
-                    Log.i(TAG, "Starting native Aiku daemon process...");
+                    Log.i(TAG, "Spawning native Aiku engine...");
                     ProcessBuilder pb = new ProcessBuilder(binFile.getAbsolutePath());
                     pb.directory(filesDir);
                     pb.environment().put("ANDROID_DATA_DIR", filesDir.getAbsolutePath());
@@ -60,9 +72,9 @@ public class AikuForegroundService extends Service {
 
                     daemonProcess = pb.start();
                     int exitCode = daemonProcess.waitFor();
-                    Log.w(TAG, "Daemon stopped with code " + exitCode + ". Restarting in 2 seconds...");
+                    Log.w(TAG, "Daemon stopped with code " + exitCode + ". Auto-restarting in 2s...");
                 } catch (Exception e) {
-                    Log.e(TAG, "Daemon error: " + e.getMessage(), e);
+                    Log.e(TAG, "Supervisor exception: " + e.getMessage(), e);
                 }
 
                 if (isRunning) {
@@ -75,27 +87,45 @@ public class AikuForegroundService extends Service {
         supervisorThread.start();
     }
 
-    private void extractAssets(File destDir) {
+    private void extractAssetsRecursive(String assetSubDir, File targetDir) {
+        AssetManager assetManager = getAssets();
         try {
-            String[] files = getAssets().list("");
-            if (files != null) {
-                for (String filename : files) {
-                    if (filename.equals("images") || filename.equals("webkit")) continue;
-                    File outFile = new File(destDir, filename);
-                    if (!outFile.exists() || filename.equals("aiku-daemon")) {
-                        try (InputStream in = getAssets().open(filename);
-                             OutputStream out = new FileOutputStream(outFile)) {
-                            byte[] buffer = new byte[8192];
-                            int read;
-                            while ((read = in.read(buffer)) != -1) {
-                                out.write(buffer, 0, read);
-                            }
-                        }
-                    }
+            String[] assets = assetManager.list(assetSubDir);
+            if (assets == null || assets.length == 0) {
+                if (!assetSubDir.isEmpty()) {
+                    copyFileAsset(assetSubDir, new File(targetDir, assetSubDir));
+                }
+            } else {
+                File dir = new File(targetDir, assetSubDir);
+                if (!dir.exists()) {
+                    dir.mkdirs();
+                }
+                for (String asset : assets) {
+                    if (asset.equals("images") || asset.equals("webkit")) continue;
+                    String subPath = assetSubDir.isEmpty() ? asset : assetSubDir + "/" + asset;
+                    extractAssetsRecursive(subPath, targetDir);
                 }
             }
         } catch (Exception e) {
-            Log.e(TAG, "Asset extraction error: " + e.getMessage());
+            Log.e(TAG, "Asset copy failed for path: " + assetSubDir + " : " + e.getMessage());
+        }
+    }
+
+    private void copyFileAsset(String assetPath, File outFile) {
+        if (outFile.exists() && outFile.length() > 0 && !assetPath.equals("aiku-daemon")) {
+            return; // Skip if already extracted
+        }
+        outFile.getParentFile().mkdirs();
+        try (InputStream in = getAssets().open(assetPath);
+             OutputStream out = new FileOutputStream(outFile)) {
+            byte[] buffer = new byte[16384];
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                out.write(buffer, 0, read);
+            }
+            out.flush();
+        } catch (Exception e) {
+            Log.e(TAG, "Error writing asset " + assetPath + ": " + e.getMessage());
         }
     }
 
@@ -103,7 +133,7 @@ public class AikuForegroundService extends Service {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID,
-                    "Aiku Background Service",
+                    "Aiku Core Service",
                     NotificationManager.IMPORTANCE_LOW
             );
             NotificationManager manager = getSystemService(NotificationManager.class);
