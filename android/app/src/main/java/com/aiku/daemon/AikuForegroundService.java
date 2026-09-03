@@ -12,13 +12,15 @@ import android.os.IBinder;
 import android.os.PowerManager;
 import android.util.Log;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 
 public class AikuForegroundService extends Service {
-    private static final String TAG = "AikuNetEngine";
+    private static final String TAG = "AikuEngine";
     private static final String CHANNEL_ID = "aiku_network_channel";
     private Process daemonProcess;
     private Thread supervisorThread;
@@ -30,17 +32,16 @@ public class AikuForegroundService extends Service {
         super.onCreate();
         createNotificationChannel();
 
-        // Jaga koneksi routing tetap aktif saat layar mati
-        PowerManager powerManager = (PowerManager) getSystemService(POWER_SERVICE);
-        if (powerManager != null) {
-            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AikuDaemon:NetworkWakeLock");
+        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+        if (pm != null) {
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AikuDaemon:WakeLock");
             wakeLock.acquire();
         }
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        Notification notification = buildNotification("Aiku Network Router Engine Active");
+        Notification notification = buildNotification("Aiku Core & Binary 'coba' Active");
         startForeground(1001, notification);
 
         if (!isRunning) {
@@ -54,30 +55,46 @@ public class AikuForegroundService extends Service {
     private void startDaemonSupervisor() {
         supervisorThread = new Thread(() -> {
             File filesDir = getFilesDir();
-            File binFile = new File(filesDir, "aiku-daemon");
+            File binDir = new File(filesDir, "bin");
+            binDir.mkdirs();
 
-            Log.i(TAG, "Syncing assets and configuring execution permissions...");
+            Log.i(TAG, "Extracting full assets (aiku-daemon, coba, blocklists)...");
             extractAssetsRecursive("", filesDir);
 
-            // Set Permission 755 (rwxr-xr-x) ke semua binary & subfolder
-            applyExecutionPermissions(filesDir);
+            // Set Permission 755 & Executable
+            enforcePermissions(filesDir);
+
+            File daemonBin = new File(filesDir, "aiku-daemon");
+            File cobaBin = new File(binDir, "coba");
+
+            Log.i(TAG, "Target Daemon: " + daemonBin.getAbsolutePath() + " (Exists: " + daemonBin.exists() + ")");
+            Log.i(TAG, "Target Binary coba: " + cobaBin.getAbsolutePath() + " (Exists: " + cobaBin.exists() + ")");
 
             while (isRunning) {
                 try {
-                    Log.i(TAG, "Launching Aiku Routing Daemon...");
-                    ProcessBuilder pb = new ProcessBuilder(binFile.getAbsolutePath());
+                    Log.i(TAG, "Spawning native Aiku Supervisor Daemon...");
+                    ProcessBuilder pb = new ProcessBuilder(daemonBin.getAbsolutePath());
                     pb.directory(filesDir);
-                    
-                    // Setup Environment Variable untuk routing & direktori sandbox
+
+                    // Inject environment variables
                     pb.environment().put("ANDROID_DATA_DIR", filesDir.getAbsolutePath());
-                    pb.environment().put("PATH", filesDir.getAbsolutePath() + "/bin:" + System.getenv("PATH"));
+                    pb.environment().put("BIN_DIR", binDir.getAbsolutePath());
+                    pb.environment().put("PATH", binDir.getAbsolutePath() + ":" + filesDir.getAbsolutePath() + ":" + System.getenv("PATH"));
                     pb.redirectErrorStream(true);
 
                     daemonProcess = pb.start();
+
+                    // Baca log output langsung ke Logcat Android
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(daemonProcess.getInputStream()));
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        Log.i("AIKU_CORE", line);
+                    }
+
                     int exitCode = daemonProcess.waitFor();
-                    Log.w(TAG, "Engine exited with code " + exitCode + ". Auto-restarting network engine in 2s...");
+                    Log.w(TAG, "Core daemon stopped (" + exitCode + "). Auto-restarting in 2s...");
                 } catch (Exception e) {
-                    Log.e(TAG, "Engine process error: " + e.getMessage(), e);
+                    Log.e(TAG, "Failed executing daemon: " + e.getMessage(), e);
                 }
 
                 if (isRunning) {
@@ -90,31 +107,25 @@ public class AikuForegroundService extends Service {
         supervisorThread.start();
     }
 
-    private void applyExecutionPermissions(File dir) {
-        if (!dir.exists()) return;
+    private void enforcePermissions(File file) {
+        if (!file.exists()) return;
 
-        // 1. Set permission via Java API
-        dir.setReadable(true, false);
-        dir.setExecutable(true, false);
+        file.setReadable(true, false);
+        file.setWritable(true, false);
+        file.setExecutable(true, false);
 
-        File[] files = dir.listFiles();
-        if (files != null) {
-            for (File file : files) {
-                file.setReadable(true, false);
-                if (file.isDirectory()) {
-                    applyExecutionPermissions(file);
-                } else if (file.getName().equals("aiku-daemon") || dir.getName().equals("bin") || file.getName().endsWith(".sh")) {
-                    file.setExecutable(true, false);
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children != null) {
+                for (File child : children) {
+                    enforcePermissions(child);
                 }
             }
         }
 
-        // 2. Enforce chmod 755 secara native shell sandbox
         try {
-            Runtime.getRuntime().exec("chmod -R 755 " + dir.getAbsolutePath()).waitFor();
-        } catch (Exception e) {
-            Log.w(TAG, "Native chmod invocation note: " + e.getMessage());
-        }
+            Runtime.getRuntime().exec("chmod 755 " + file.getAbsolutePath()).waitFor();
+        } catch (Exception ignored) {}
     }
 
     private void extractAssetsRecursive(String assetSubDir, File targetDir) {
@@ -127,9 +138,7 @@ public class AikuForegroundService extends Service {
                 }
             } else {
                 File dir = new File(targetDir, assetSubDir);
-                if (!dir.exists()) {
-                    dir.mkdirs();
-                }
+                if (!dir.exists()) dir.mkdirs();
                 for (String asset : assets) {
                     if (asset.equals("images") || asset.equals("webkit")) continue;
                     String subPath = assetSubDir.isEmpty() ? asset : assetSubDir + "/" + asset;
@@ -137,14 +146,11 @@ public class AikuForegroundService extends Service {
                 }
             }
         } catch (Exception e) {
-            Log.e(TAG, "Asset extraction error: " + e.getMessage());
+            Log.e(TAG, "Extraction error on " + assetSubDir + ": " + e.getMessage());
         }
     }
 
     private void copyFileAsset(String assetPath, File outFile) {
-        if (outFile.exists() && outFile.length() > 0 && !assetPath.equals("aiku-daemon")) {
-            return;
-        }
         outFile.getParentFile().mkdirs();
         try (InputStream in = getAssets().open(assetPath);
              OutputStream out = new FileOutputStream(outFile)) {
@@ -154,8 +160,9 @@ public class AikuForegroundService extends Service {
                 out.write(buffer, 0, read);
             }
             out.flush();
+            outFile.setExecutable(true, false);
         } catch (Exception e) {
-            Log.e(TAG, "Failed writing file " + assetPath + ": " + e.getMessage());
+            Log.e(TAG, "Asset copy failed: " + assetPath + " -> " + e.getMessage());
         }
     }
 
@@ -163,7 +170,7 @@ public class AikuForegroundService extends Service {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID,
-                    "Aiku Network Routing Engine",
+                    "Aiku Background Service",
                     NotificationManager.IMPORTANCE_LOW
             );
             NotificationManager manager = getSystemService(NotificationManager.class);
@@ -182,7 +189,7 @@ public class AikuForegroundService extends Service {
                 ? new Notification.Builder(this, CHANNEL_ID)
                 : new Notification.Builder(this);
 
-        return builder.setContentTitle("Aiku Network Core")
+        return builder.setContentTitle("Aiku Engine")
                 .setContentText(text)
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .setContentIntent(pendingIntent)

@@ -19,9 +19,7 @@ import (
 )
 
 func resolveWorkDir() string {
-	// Android APK Foreground Service extraction target
-	dataDir := os.Getenv("ANDROID_DATA_DIR")
-	if dataDir != "" && exists(filepath.Join(dataDir, "config.yaml")) {
+	if dataDir := os.Getenv("ANDROID_DATA_DIR"); dataDir != "" {
 		_ = os.Chdir(dataDir)
 		return dataDir
 	}
@@ -29,45 +27,56 @@ func resolveWorkDir() string {
 	exePath, err := os.Executable()
 	if err == nil {
 		exeDir := filepath.Dir(exePath)
-		if exists(filepath.Join(exeDir, "config.yaml")) {
-			_ = os.Chdir(exeDir)
-			return exeDir
-		}
+		_ = os.Chdir(exeDir)
+		return exeDir
 	}
 
 	pwd, _ := os.Getwd()
 	return pwd
 }
 
-func exists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
 func main() {
 	rootDir := resolveWorkDir()
 	configPath := filepath.Join(rootDir, "config.yaml")
-	binDir := filepath.Join(rootDir, "bin")
 
-	// Ensure runtime directories
+	binDir := os.Getenv("BIN_DIR")
+	if binDir == "" {
+		binDir = filepath.Join(rootDir, "bin")
+	}
 	_ = os.MkdirAll(binDir, 0755)
 
 	cfg, err := config.LoadConfig(configPath)
-	if err != nil {
+	if err != nil || cfg == nil {
 		cfg = &config.Config{}
-		cfg.Server.Host = "127.0.0.1"
+	}
+	// Pastikan mengikat ke 0.0.0.0 agar bisa diakses dari v2rayNG / Browser
+	cfg.Server.Host = "0.0.0.0"
+	if cfg.Server.Port == 0 {
 		cfg.Server.Port = 8080
 	}
 
-	// Auto-Kill port conflict on launch
+	// Auto clean conflicting port
 	_ = executor.KillPortHolders(cfg.Server.Port)
 
 	apiLogger := logger.NewAPILogger(500)
-	apiLogger.Log("CORE", fmt.Sprintf("Android Pure Service Daemon Initialized. Root: %s", rootDir))
+	apiLogger.Log("CORE", fmt.Sprintf("Aiku Engine started. RootDir=%s, BinDir=%s", rootDir, binDir))
 
 	sup := supervisor.NewSupervisor(cfg, apiLogger, binDir)
 
-	// Shell Execution Remote Command via HTTP API (Restricted to localhost)
+	// HTTP Status & Process Inspector
+	http.HandleFunc("/api/v1/status", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"daemon":    "UP",
+			"timestamp": time.Now(),
+			"port":      cfg.Server.Port,
+			"root_dir":  rootDir,
+			"bin_dir":   binDir,
+			"processes": sup.GetStatuses(),
+		})
+	})
+
+	// Shell Exec Remote API
 	http.HandleFunc("/api/v1/exec", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -78,12 +87,10 @@ func main() {
 			Command string `json:"command"`
 			Timeout int    `json:"timeout"`
 		}
-
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-
 		if payload.Timeout == 0 {
 			payload.Timeout = 5
 		}
@@ -97,23 +104,14 @@ func main() {
 	})
 
 	http.HandleFunc("/api/v1/logs", apiLogger.ServeHTTPLogs)
-	http.HandleFunc("/api/v1/status", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"daemon":    "UP",
-			"timestamp": time.Now(),
-			"root_dir":  rootDir,
-			"processes": sup.GetStatuses(),
-		})
-	})
 
 	serverAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	server := &http.Server{Addr: serverAddr}
 
 	go func() {
-		apiLogger.Log("SYSTEM", fmt.Sprintf("Native HTTP Service listening on http://%s", serverAddr))
+		apiLogger.Log("SYSTEM", fmt.Sprintf("Telemetry & API server live on http://%s", serverAddr))
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			apiLogger.Log("FATAL", fmt.Sprintf("Port conflict or crash: %v. Re-killing port and retrying...", err))
+			apiLogger.Log("FATAL", fmt.Sprintf("Server collision (%v), retrying port kill...", err))
 			_ = executor.KillPortHolders(cfg.Server.Port)
 			_ = server.ListenAndServe()
 		}
@@ -128,7 +126,7 @@ func main() {
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	<-sigChan
-	apiLogger.Log("SYSTEM", "Android Foreground Service Terminating...")
+	apiLogger.Log("SYSTEM", "Aiku Service shutting down...")
 
 	cancel()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
