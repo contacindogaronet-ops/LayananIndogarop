@@ -99,3 +99,4 @@ jobs:
           path: |
             dist/aiku-daemon-termux-arm64.tar.gz
             dist/aiku-daemon-linux-amd64.tar.gz
+# trigger action
