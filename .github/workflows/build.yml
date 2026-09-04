@@ -51,12 +51,18 @@ jobs:
           echo "VERSION_CODE=$V_CODE" >> $GITHUB_ENV
           echo "VERSION_NAME=$V_NAME" >> $GITHUB_ENV
 
-      - name: "Prepare Persistent Keystore"
+      - name: "Prepare Persistent Keystore & Gradle Properties"
         run: |
           mkdir -p android/app
+          # Ensure gradle.properties exists with AndroidX enabled
+          echo "android.useAndroidX=true" > android/gradle.properties
+          echo "android.enableJetifier=true" >> android/gradle.properties
+
           if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "Decoding repository keystore secret..."
             echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.keystore
           else
+            echo "Generating fallback keystore..."
             keytool -genkeypair -v \
               -keystore android/app/release.keystore \
               -alias aikukey \
@@ -65,7 +71,7 @@ jobs:
               -validity 20000 \
               -storepass aikurelease2026 \
               -keypass aikurelease2026 \
-              -deststoretype PKCS12 \
+              -storetype PKCS12 \
               -dname "CN=AikuService, OU=NetworkCore, O=Aiku, L=Jakarta, ST=ID, C=ID"
           fi
 
