@@ -14,7 +14,7 @@ on:
 
 jobs:
   build-and-release:
-    name: "Build Signed APK & Publish Release"
+    name: "Build Signed APK & Auto Versioning"
     runs-on: ubuntu-latest
 
     steps:
@@ -38,23 +38,24 @@ jobs:
       - name: "Setup Android SDK"
         uses: android-actions/setup-android@v3
 
-      - name: "Generate Keystore for Production Signing"
+      - name: "Prepare Persistent Keystore"
         run: |
           mkdir -p android/app
-          if [ -z "${{ secrets.KEYSTORE_BASE64 }}" ]; then
-            echo "Generating automated release keystore..."
+          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "Using user-provided KEYSTORE_BASE64 secret..."
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.keystore
+          else
+            echo "Generating persistent release keystore..."
             keytool -genkeypair -v \
               -keystore android/app/release.keystore \
               -alias aikukey \
               -keyalg RSA \
               -keysize 2048 \
-              -validity 10000 \
-              -storepass aikusecret \
-              -keypass aikusecret \
-              -dname "CN=Aiku, OU=Core, O=Aiku, L=Jakarta, ST=ID, C=ID"
-          else
-            echo "Decoding repository keystore secret..."
-            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.keystore
+              -validity 20000 \
+              -storepass aikurelease2026 \
+              -keypass aikurelease2026 \
+              -deststoretype PKCS12 \
+              -dname "CN=AikuService, OU=NetworkCore, O=Aiku, L=Jakarta, ST=ID, C=ID"
           fi
 
       - name: "Compile Go Daemon & Bundle Assets"
@@ -72,7 +73,7 @@ jobs:
             cp coba android/app/src/main/assets/coba
           fi
 
-          # 3. Bundle .env via app.env alias (agar tidak diabaikan oleh AAPT)
+          # 3. Bundle .env via app.env alias
           if [ -f .env ]; then
             cp .env android/app/src/main/assets/app.env
           else
@@ -90,12 +91,29 @@ jobs:
             mkdir -p android/app/src/main/assets/blocklists
           fi
 
+      - name: "Determine Dynamic Versioning"
+        id: versioning
+        run: |
+          RUN_NUM="${{ github.run_number }}"
+          V_CODE=$((100 + RUN_NUM))
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            V_NAME="${GITHUB_REF#refs/tags/v}"
+          else
+            V_NAME="1.0.${RUN_NUM}"
+          fi
+          echo "Calculated Version Code: $V_CODE"
+          echo "Calculated Version Name: $V_NAME"
+          echo "VERSION_CODE=$V_CODE" >> $GITHUB_ENV
+          echo "VERSION_NAME=$V_NAME" >> $GITHUB_ENV
+
       - name: "Assemble Signed APK via Gradle"
         env:
           KEYSTORE_PATH: "release.keystore"
-          KEYSTORE_STORE_PASSWORD: "aikusecret"
+          KEYSTORE_STORE_PASSWORD: "aikurelease2026"
           KEYSTORE_KEY_ALIAS: "aikukey"
-          KEYSTORE_KEY_PASSWORD: "aikusecret"
+          KEYSTORE_KEY_PASSWORD: "aikurelease2026"
+          VERSION_CODE: ${{ env.VERSION_CODE }}
+          VERSION_NAME: ${{ env.VERSION_NAME }}
         run: |
           cd android
           gradle wrapper --gradle-version 8.5
@@ -105,15 +123,15 @@ jobs:
       - name: "Upload Artifacts"
         uses: actions/upload-artifact@v4
         with:
-          name: "aiku-service-release.apk"
+          name: "aiku-service-${{ env.VERSION_NAME }}.apk"
           path: android/app/build/outputs/apk/release/app-release.apk
 
       - name: "Create GitHub Release (Trigger on Tag or [release] commit)"
         if: startsWith(github.ref, 'refs/tags/v') || contains(github.event.head_commit.message, '[release]')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: "Release ${{ github.ref_name }}"
+          tag_name: ${{ env.VERSION_NAME }}
+          name: "Release v${{ env.VERSION_NAME }}"
           draft: false
           prerelease: false
           files: |

@@ -2,6 +2,9 @@ plugins {
     id 'com.android.application'
 }
 
+def autoVersionCode = Integer.parseInt(System.getenv("VERSION_CODE") ?: "100")
+def autoVersionName = System.getenv("VERSION_NAME") ?: "1.0.${autoVersionCode}"
+
 android {
     namespace 'com.aiku.daemon'
     compileSdk 34
@@ -10,8 +13,8 @@ android {
         applicationId "com.aiku.daemon"
         minSdk 21
         targetSdk 28
-        versionCode 1
-        versionName "1.0.0"
+        versionCode autoVersionCode
+        versionName autoVersionName
     }
 
     androidResources {
@@ -27,9 +30,9 @@ android {
     signingConfigs {
         release {
             storeFile file(System.getenv("KEYSTORE_PATH") ?: "release.keystore")
-            storePassword System.getenv("KEYSTORE_STORE_PASSWORD") ?: "aikusecret"
+            storePassword System.getenv("KEYSTORE_STORE_PASSWORD") ?: "aikurelease2026"
             keyAlias System.getenv("KEYSTORE_KEY_ALIAS") ?: "aikukey"
-            keyPassword System.getenv("KEYSTORE_KEY_PASSWORD") ?: "aikusecret"
+            keyPassword System.getenv("KEYSTORE_KEY_PASSWORD") ?: "aikurelease2026"
         }
     }
 
