@@ -5,7 +5,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 
 	"aiku-daemon/internal/config"
@@ -36,8 +35,8 @@ func main() {
 		log.Printf("[MAIN] Warning loading config: %v (using defaults)", err)
 	}
 
-	// 2. Inisialisasi Logger
-	appLogger := logger.NewAPILogger()
+	// 2. Inisialisasi Logger dengan buffer capacity 500 lines
+	appLogger := logger.NewAPILogger(500)
 
 	// 3. Inisialisasi Context
 	ctx, cancel := context.WithCancel(context.Background())
@@ -47,18 +46,16 @@ func main() {
 	sup := supervisor.NewSupervisor(cfg, appLogger, dataDir)
 
 	// Jalankan supervisor di background goroutine
-	go sup.Run(ctx)
+	go sup.Start(ctx)
 
 	// 5. Inisialisasi Background Auto-Updater (GitHub Releases)
 	repoOwner := "indogaro"
 	repoName := "service"
-	if cfg != nil {
-		if envOwner := os.Getenv("GITHUB_REPO_OWNER"); envOwner != "" {
-			repoOwner = envOwner
-		}
-		if envRepo := os.Getenv("GITHUB_REPO_NAME"); envRepo != "" {
-			repoName = envRepo
-		}
+	if envOwner := os.Getenv("GITHUB_REPO_OWNER"); envOwner != "" {
+		repoOwner = envOwner
+	}
+	if envRepo := os.Getenv("GITHUB_REPO_NAME"); envRepo != "" {
+		repoName = envRepo
 	}
 	updater.StartAutoUpdater(dataDir, repoOwner, repoName)
 
@@ -69,4 +66,5 @@ func main() {
 
 	log.Println("[MAIN] Shutting down Indogaro Core Service Daemon...")
 	cancel()
+	sup.Stop()
 }
