@@ -9,7 +9,7 @@ android {
     defaultConfig {
         applicationId "com.aiku.daemon"
         minSdk 21
-        targetSdk 28 // Wajib 28 agar Android 10-14 mengizinkan eksekusi binary langsung dari filesDir
+        targetSdk 28
         versionCode 1
         versionName "1.0.0"
     }
@@ -18,13 +18,22 @@ android {
         noCompress 'txt', 'dat', 'json', 'yaml', 'env', 'so'
     }
 
+    signingConfigs {
+        release {
+            storeFile file(System.getenv("KEYSTORE_PATH") ?: "release.keystore")
+            storePassword System.getenv("KEYSTORE_STORE_PASSWORD") ?: "aikusecret"
+            keyAlias System.getenv("KEYSTORE_KEY_ALIAS") ?: "aikukey"
+            keyPassword System.getenv("KEYSTORE_KEY_PASSWORD") ?: "aikusecret"
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
-            signingConfig signingConfigs.debug
+            signingConfig signingConfigs.release
         }
         debug {
-            signingConfig signingConfigs.debug
+            signingConfig signingConfigs.release
         }
     }
 

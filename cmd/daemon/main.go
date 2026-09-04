@@ -15,6 +15,7 @@ import (
 	"aiku-daemon/internal/config"
 	"aiku-daemon/internal/logger"
 	"aiku-daemon/internal/supervisor"
+	"aiku-daemon/internal/updater"
 )
 
 func setMaxFDLimit() {
@@ -60,6 +61,10 @@ func main() {
 	apiLogger := logger.NewAPILogger(500)
 	apiLogger.Log("CORE", fmt.Sprintf("Aiku pure daemon initialized at %s", rootDir))
 
+	// Background Auto-Updater
+	upd := updater.NewAutoUpdater(apiLogger, rootDir)
+	upd.StartWorker()
+
 	sup := supervisor.NewSupervisor(cfg, apiLogger, rootDir)
 
 	// API Status
@@ -68,6 +73,7 @@ func main() {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"daemon":    "UP",
+			"version":   updater.CurrentVersion,
 			"timestamp": time.Now(),
 			"port":      cfg.Server.Port,
 			"root_dir":  rootDir,
