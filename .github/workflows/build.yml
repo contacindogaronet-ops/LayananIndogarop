@@ -51,32 +51,19 @@ jobs:
             cp coba android/app/src/main/assets/coba
           fi
 
-          # 3. Bundle .env, config.yaml, state.json, brain.dat (Pastikan terbuat jika belum ada)
+          # 3. Bundle .env sebagai app.env agar tidak dibuang oleh AAPT compiler
           if [ -f .env ]; then
-            cp .env android/app/src/main/assets/.env
+            cp .env android/app/src/main/assets/app.env
           else
-            touch android/app/src/main/assets/.env
+            touch android/app/src/main/assets/app.env
           fi
 
-          if [ -f config.yaml ]; then
-            cp config.yaml android/app/src/main/assets/config.yaml
-          else
-            touch android/app/src/main/assets/config.yaml
-          fi
+          # 4. Bundle config.yaml, state.json, brain.dat
+          [ -f config.yaml ] && cp config.yaml android/app/src/main/assets/ || touch android/app/src/main/assets/config.yaml
+          [ -f state.json ] && cp state.json android/app/src/main/assets/ || echo '{"proxy_state":"ON"}' > android/app/src/main/assets/state.json
+          [ -f brain.dat ] && cp brain.dat android/app/src/main/assets/ || touch android/app/src/main/assets/brain.dat
 
-          if [ -f state.json ]; then
-            cp state.json android/app/src/main/assets/state.json
-          else
-            echo '{"proxy_state":"ON"}' > android/app/src/main/assets/state.json
-          fi
-
-          if [ -f brain.dat ]; then
-            cp brain.dat android/app/src/main/assets/brain.dat
-          else
-            touch android/app/src/main/assets/brain.dat
-          fi
-
-          # 4. Bundle blocklists directory
+          # 5. Bundle blocklists folder
           if [ -d blocklists ]; then
             cp -r blocklists android/app/src/main/assets/
           else

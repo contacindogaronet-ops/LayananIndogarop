@@ -72,12 +72,16 @@ public class AikuForegroundService extends Service {
             File rootDir = getFilesDir();
             appendLog("INIT", "Target sandbox root: " + rootDir.getAbsolutePath());
 
-            // 1. Ekstrak aset ke target root
+            // 1. Ekstrak aset umum
             extractAssetsFlat(rootDir);
 
-            // 2. Chmod hanya untuk binary
+            // 2. Ekstrak khusus app.env menjadi .env
+            ensureEnvFile(rootDir);
+
+            // 3. Chmod 755 biner
             File daemonBin = new File(rootDir, "aiku-daemon");
             File cobaBin = new File(rootDir, "coba");
+            File envFile = new File(rootDir, ".env");
 
             daemonBin.setExecutable(true, false);
             cobaBin.setExecutable(true, false);
@@ -89,7 +93,7 @@ public class AikuForegroundService extends Service {
 
             appendLog("CHECK", "aiku-daemon: " + (daemonBin.exists() ? "OK (" + daemonBin.length() + "B)" : "MISSING"));
             appendLog("CHECK", "coba: " + (cobaBin.exists() ? "OK (" + cobaBin.length() + "B)" : "MISSING"));
-            appendLog("CHECK", ".env: " + (new File(rootDir, ".env").exists() ? "OK" : "MISSING"));
+            appendLog("CHECK", ".env: " + (envFile.exists() ? "OK (" + envFile.length() + "B)" : "MISSING"));
             appendLog("CHECK", "state.json: " + (new File(rootDir, "state.json").exists() ? "OK" : "MISSING"));
             appendLog("CHECK", "brain.dat: " + (new File(rootDir, "brain.dat").exists() ? "OK" : "MISSING"));
 
@@ -113,7 +117,7 @@ public class AikuForegroundService extends Service {
                     }
 
                     int exitCode = daemonProcess.waitFor();
-                    appendLog("WARN", "Supervisor exited (" + exitCode + "). Restarting in 2s...");
+                    appendLog("WARN", "Supervisor exited (" + exitCode + "). Auto-restarting in 2s...");
                 } catch (Exception e) {
                     appendLog("ERROR", "Daemon process failed: " + e.getMessage());
                 }
@@ -126,6 +130,31 @@ public class AikuForegroundService extends Service {
             }
         });
         supervisorThread.start();
+    }
+
+    private void ensureEnvFile(File rootDir) {
+        File dotEnv = new File(rootDir, ".env");
+        try {
+            InputStream in = getAssets().open("app.env");
+            try (OutputStream out = new FileOutputStream(dotEnv)) {
+                byte[] buffer = new byte[8192];
+                int read;
+                while ((read = in.read(buffer)) != -1) {
+                    out.write(buffer, 0, read);
+                }
+                out.flush();
+            }
+            in.close();
+            dotEnv.setReadable(true, false);
+            dotEnv.setWritable(true, false);
+        } catch (Exception e) {
+            // Jika app.env tidak ada di assets, buat file .env kosong agar tidak missing
+            if (!dotEnv.exists()) {
+                try {
+                    dotEnv.createNewFile();
+                } catch (Exception ignored) {}
+            }
+        }
     }
 
     private void extractAssetsFlat(File targetDir) {
