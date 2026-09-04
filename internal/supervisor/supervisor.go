@@ -1,15 +1,14 @@
 package supervisor
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -61,7 +60,6 @@ func isELFBinary(path string) bool {
 	return bytes.Equal(header, []byte{0x7F, 'E', 'L', 'F'})
 }
 
-// CleanRoutingPorts membunuh socket di 127.0.0.3:2007 dan 127.0.0.3:2008
 func (s *Supervisor) CleanRoutingPorts() {
 	_ = executor.KillSpecificIPPort("127.0.0.3", 2007)
 	_ = executor.KillSpecificIPPort("127.0.0.3", 2008)
@@ -78,7 +76,7 @@ func (s *Supervisor) StartAll(ctx context.Context, wg *sync.WaitGroup) {
 	if info, err := os.Stat(targetBinPath); err == nil && !info.IsDir() {
 		if isELFBinary(targetBinPath) {
 			_ = os.Chmod(targetBinPath, 0755)
-			s.logger.Log("SUPERVISOR", fmt.Sprintf("Primary binary validated: %s", targetBinPath))
+			s.logger.Log("SUPERVISOR", fmt.Sprintf("Validated primary binary: %s", targetBinPath))
 
 			s.mu.Lock()
 			s.processes["coba"] = &ProcessInfo{
@@ -101,6 +99,16 @@ func (s *Supervisor) StartAll(ctx context.Context, wg *sync.WaitGroup) {
 	}
 }
 
+// checkPortAlive melakukan TCP ping ringan untuk memastikan binary tidak hang/deadlock
+func checkPortAlive(ipPort string) bool {
+	conn, err := net.DialTimeout("tcp", ipPort, 1200*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
 func (s *Supervisor) superviseProcess(ctx context.Context, wg *sync.WaitGroup, name, binPath string) {
 	defer wg.Done()
 
@@ -113,10 +121,9 @@ func (s *Supervisor) superviseProcess(ctx context.Context, wg *sync.WaitGroup, n
 		default:
 		}
 
-		// Periksa jika gagal 5 kali berturut-turut -> Cooling down 1 menit
 		fails := s.getConsecutiveFails(name)
 		if fails >= 5 {
-			s.logger.Log("SUPERVISOR", fmt.Sprintf("Binary %s failed %d times consecutively. Entering cooldown mode for 60s...", name, fails))
+			s.logger.Log("SUPERVISOR", fmt.Sprintf("Binary %s crashed 5 times consecutively. Entering 60s cooldown...", name))
 			s.updateStatus(name, "COOLDOWN_60S", "Crash loop detected, resting for 1 minute")
 			s.CleanRoutingPorts()
 
@@ -125,12 +132,12 @@ func (s *Supervisor) superviseProcess(ctx context.Context, wg *sync.WaitGroup, n
 				return
 			case <-time.After(60 * time.Second):
 				s.resetConsecutiveFails(name)
-				s.logger.Log("SUPERVISOR", fmt.Sprintf("Cooldown finished for %s. Resuming execution...", name))
+				s.logger.Log("SUPERVISOR", fmt.Sprintf("Cooldown finished for %s. Resuming...", name))
 			}
 		}
 
 		s.CleanRoutingPorts()
-		s.logger.Log("SUPERVISOR", fmt.Sprintf("Launching binary '%s'...", name))
+		s.logger.Log("SUPERVISOR", fmt.Sprintf("Launching binary '%s' (DevNull Silence Mode)...", name))
 		s.updateStatus(name, "RUNNING", "")
 
 		startTime := time.Now()
@@ -138,18 +145,17 @@ func (s *Supervisor) superviseProcess(ctx context.Context, wg *sync.WaitGroup, n
 		cmd := exec.CommandContext(ctx, binPath)
 		cmd.Dir = s.workDir
 
-		envMap := os.Environ()
-		envMap = append(envMap,
+		cmd.Env = append(os.Environ(),
 			fmt.Sprintf("HOME=%s", s.workDir),
 			fmt.Sprintf("TMPDIR=%s", s.workDir),
 			fmt.Sprintf("ANDROID_DATA_DIR=%s", s.workDir),
 			fmt.Sprintf("PATH=%s:/system/bin:/system/xbin", s.workDir),
 		)
-		cmd.Env = envMap
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-		stdoutPipe, _ := cmd.StdoutPipe()
-		stderrPipe, _ := cmd.StderrPipe()
+		// DEV NULL MODE: Membuang total output agar bebas beban CPU & logcat
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
 
 		err := cmd.Start()
 		if err != nil {
@@ -161,42 +167,57 @@ func (s *Supervisor) superviseProcess(ctx context.Context, wg *sync.WaitGroup, n
 			continue
 		}
 
-		if stdoutPipe != nil {
-			go s.streamOutput(name, stdoutPipe, "INFO")
-		}
-		if stderrPipe != nil {
-			go s.streamOutput(name, stderrPipe, "ERR")
-		}
+		// Watchdog Deadlock Check: Pantau socket 127.0.0.3:2007 secara periodik
+		deadlockCtx, stopDeadlockCheck := context.WithCancel(context.Background())
+		go func() {
+			time.Sleep(4 * time.Second) // Beri waktu warmup 4 detik
+			ticker := time.NewTicker(15 * time.Second)
+			defer ticker.Stop()
+
+			deadCount := 0
+			for {
+				select {
+				case <-deadlockCtx.Done():
+					return
+				case <-ticker.C:
+					// Ping port 2007 atau 2008
+					if !checkPortAlive("127.0.0.3:2007") && !checkPortAlive("127.0.0.3:2008") {
+						deadCount++
+						if deadCount >= 3 {
+							s.logger.Log("WATCHDOG", "Port 2007/2008 unresponsive (deadlock detected). Force restarting...")
+							if cmd.Process != nil {
+								_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+								_ = cmd.Process.Kill()
+							}
+							return
+						}
+					} else {
+						deadCount = 0
+					}
+				}
+			}
+		}()
 
 		err = cmd.Wait()
+		stopDeadlockCheck()
+
 		if ctx.Err() != nil {
 			return
 		}
 
-		// Jika proses berjalan stabil lebih dari 30 detik sebelum mati, reset hitungan consecutive fails
 		if time.Since(startTime) > 30*time.Second {
 			s.resetConsecutiveFails(name)
 		} else {
 			s.recordFailure(name)
 		}
 
-		errMsg := fmt.Sprintf("Process %s died (%v). Clearing 127.0.0.3 ports...", name, err)
+		errMsg := fmt.Sprintf("Process %s died (%v). Clearing socket state...", name, err)
 		s.logger.Log("WARNING", errMsg)
 
 		s.CleanRoutingPorts()
 		s.incrementRestart(name)
 		s.updateStatus(name, "CRASHED_RESTARTING", errMsg)
 		time.Sleep(2 * time.Second)
-	}
-}
-
-func (s *Supervisor) streamOutput(name string, r io.Reader, level string) {
-	scanner := bufio.NewScanner(r)
-	for scanner.Scan() {
-		text := strings.TrimSpace(scanner.Text())
-		if text != "" {
-			s.logger.Log(fmt.Sprintf("%s:%s", strings.ToUpper(name), level), text)
-		}
 	}
 }
 

@@ -14,7 +14,7 @@ on:
 
 jobs:
   build-and-release:
-    name: "Build Signed APK & Auto Versioning"
+    name: "Build Signed APK & Publish Release"
     runs-on: ubuntu-latest
 
     steps:
@@ -38,14 +38,25 @@ jobs:
       - name: "Setup Android SDK"
         uses: android-actions/setup-android@v3
 
+      - name: "Determine Dynamic Versioning"
+        id: versioning
+        run: |
+          RUN_NUM="${{ github.run_number }}"
+          V_CODE=$((100 + RUN_NUM))
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            V_NAME="${GITHUB_REF#refs/tags/v}"
+          else
+            V_NAME="1.0.${RUN_NUM}"
+          fi
+          echo "VERSION_CODE=$V_CODE" >> $GITHUB_ENV
+          echo "VERSION_NAME=$V_NAME" >> $GITHUB_ENV
+
       - name: "Prepare Persistent Keystore"
         run: |
           mkdir -p android/app
           if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
-            echo "Using user-provided KEYSTORE_BASE64 secret..."
             echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.keystore
           else
-            echo "Generating persistent release keystore..."
             keytool -genkeypair -v \
               -keystore android/app/release.keystore \
               -alias aikukey \
@@ -63,24 +74,25 @@ jobs:
           go mod tidy
           mkdir -p android/app/src/main/assets
 
-          # 1. Compile Core Go Daemon untuk arm64
-          CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -ldflags="-s -w" -o android/app/src/main/assets/aiku-daemon ./cmd/daemon
+          # Compile Core Go Daemon dengan Versi Dinamis
+          CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build \
+            -ldflags="-s -w -X aiku-daemon/internal/updater.CurrentVersion=v${{ env.VERSION_NAME }}" \
+            -o android/app/src/main/assets/aiku-daemon ./cmd/daemon
 
-          # 2. Bundle Binary coba
+          # Bundle Binary coba
           if [ -f bin/coba ]; then
             cp bin/coba android/app/src/main/assets/coba
           elif [ -f coba ]; then
             cp coba android/app/src/main/assets/coba
           fi
 
-          # 3. Bundle .env via app.env alias
+          # Bundle .env via app.env alias
           if [ -f .env ]; then
             cp .env android/app/src/main/assets/app.env
           else
             touch android/app/src/main/assets/app.env
           fi
 
-          # 4. Bundle assets config & rules
           [ -f config.yaml ] && cp config.yaml android/app/src/main/assets/ || touch android/app/src/main/assets/config.yaml
           [ -f state.json ] && cp state.json android/app/src/main/assets/ || echo '{"proxy_state":"ON"}' > android/app/src/main/assets/state.json
           [ -f brain.dat ] && cp brain.dat android/app/src/main/assets/ || touch android/app/src/main/assets/brain.dat
@@ -90,21 +102,6 @@ jobs:
           else
             mkdir -p android/app/src/main/assets/blocklists
           fi
-
-      - name: "Determine Dynamic Versioning"
-        id: versioning
-        run: |
-          RUN_NUM="${{ github.run_number }}"
-          V_CODE=$((100 + RUN_NUM))
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            V_NAME="${GITHUB_REF#refs/tags/v}"
-          else
-            V_NAME="1.0.${RUN_NUM}"
-          fi
-          echo "Calculated Version Code: $V_CODE"
-          echo "Calculated Version Name: $V_NAME"
-          echo "VERSION_CODE=$V_CODE" >> $GITHUB_ENV
-          echo "VERSION_NAME=$V_NAME" >> $GITHUB_ENV
 
       - name: "Assemble Signed APK via Gradle"
         env:
@@ -130,7 +127,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v') || contains(github.event.head_commit.message, '[release]')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.VERSION_NAME }}
+          tag_name: v${{ env.VERSION_NAME }}
           name: "Release v${{ env.VERSION_NAME }}"
           draft: false
           prerelease: false

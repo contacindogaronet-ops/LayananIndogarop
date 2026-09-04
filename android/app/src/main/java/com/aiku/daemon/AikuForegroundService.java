@@ -6,10 +6,12 @@ import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Intent;
 import android.content.res.AssetManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
 import android.util.Log;
+import androidx.core.content.FileProvider;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -20,9 +22,10 @@ import java.io.OutputStream;
 
 public class AikuForegroundService extends Service {
     private static final String TAG = "AikuCore";
-    private static final String CHANNEL_ID = "aiku_service_channel";
+    private static final String CHANNEL_ID = "aiku_silent_channel";
     private Process daemonProcess;
     private Thread supervisorThread;
+    private Thread updateWatcherThread;
     private PowerManager.WakeLock wakeLock;
     private volatile boolean isRunning = false;
 
@@ -46,16 +49,47 @@ public class AikuForegroundService extends Service {
         if (!isRunning) {
             isRunning = true;
             startDaemonSupervisor();
+            startUpdateWatcher();
         }
 
         return START_STICKY;
     }
 
+    private void startUpdateWatcher() {
+        updateWatcherThread = new Thread(() -> {
+            File rootDir = getFilesDir();
+            File triggerSig = new File(rootDir, "trigger_update.sig");
+            File updateApk = new File(rootDir, "update.apk");
+
+            while (isRunning) {
+                if (triggerSig.exists() && updateApk.exists()) {
+                    triggerSig.delete();
+                    triggerApkInstall(updateApk);
+                }
+                try {
+                    Thread.sleep(10000);
+                } catch (InterruptedException ignored) {}
+            }
+        });
+        updateWatcherThread.start();
+    }
+
+    private void triggerApkInstall(File apkFile) {
+        try {
+            Intent intent = new Intent(Intent.ACTION_VIEW);
+            Uri apkUri = FileProvider.getUriForFile(this, "com.aiku.daemon.fileprovider", apkFile);
+            intent.setDataAndType(apkUri, "application/vnd.android.package-archive");
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(intent);
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to launch installer: " + e.getMessage());
+        }
+    }
+
     private void startDaemonSupervisor() {
         supervisorThread = new Thread(() -> {
             File rootDir = getFilesDir();
-            Log.i(TAG, "Starting pure daemon core at: " + rootDir.getAbsolutePath());
-
             extractAssetsFlat(rootDir);
             ensureEnvFile(rootDir);
 
@@ -89,10 +123,9 @@ public class AikuForegroundService extends Service {
                         Log.i("AIKU_DAEMON", line);
                     }
 
-                    int exitCode = daemonProcess.waitFor();
-                    Log.w(TAG, "Daemon stopped (" + exitCode + "). Restarting in 2s...");
+                    daemonProcess.waitFor();
                 } catch (Exception e) {
-                    Log.e(TAG, "Supervisor execution error: " + e.getMessage());
+                    Log.e(TAG, "Daemon run exception: " + e.getMessage());
                 }
 
                 if (isRunning) {
@@ -186,7 +219,7 @@ public class AikuForegroundService extends Service {
                 : new Notification.Builder(this);
 
         return builder.setContentTitle("Aiku Service Engine")
-                .setContentText("127.0.0.3:2007 & 2008 Active")
+                .setContentText("Active background daemon")
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .build();
     }
