@@ -3,7 +3,6 @@ package com.aiku.daemon;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
-import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.content.res.AssetManager;
@@ -21,7 +20,7 @@ import java.io.OutputStream;
 
 public class AikuForegroundService extends Service {
     private static final String TAG = "AikuCore";
-    private static final String CHANNEL_ID = "aiku_service_channel";
+    private static final String CHANNEL_ID = "aiku_silent_service";
     private Process daemonProcess;
     private Thread supervisorThread;
     private PowerManager.WakeLock wakeLock;
@@ -41,7 +40,7 @@ public class AikuForegroundService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        Notification notification = buildNotification("Aiku Network Core Running");
+        Notification notification = buildNotification();
         startForeground(1001, notification);
 
         if (!isRunning) {
@@ -55,9 +54,8 @@ public class AikuForegroundService extends Service {
     private void startDaemonSupervisor() {
         supervisorThread = new Thread(() -> {
             File rootDir = getFilesDir();
-            Log.i(TAG, "Initializing root sandbox: " + rootDir.getAbsolutePath());
+            Log.i(TAG, "Starting pure ghost daemon in: " + rootDir.getAbsolutePath());
 
-            // Ekstrak & siapkan file
             extractAssetsFlat(rootDir);
             ensureEnvFile(rootDir);
 
@@ -74,13 +72,13 @@ public class AikuForegroundService extends Service {
 
             while (isRunning) {
                 try {
-                    Log.i(TAG, "Spawning native aiku-daemon...");
                     ProcessBuilder pb = new ProcessBuilder(daemonBin.getAbsolutePath());
                     pb.directory(rootDir);
 
                     pb.environment().put("ANDROID_DATA_DIR", rootDir.getAbsolutePath());
                     pb.environment().put("HOME", rootDir.getAbsolutePath());
-                    pb.environment().put("PATH", rootDir.getAbsolutePath() + ":" + System.getenv("PATH"));
+                    pb.environment().put("TMPDIR", rootDir.getAbsolutePath());
+                    pb.environment().put("PATH", rootDir.getAbsolutePath() + ":/system/bin:/system/xbin");
                     pb.redirectErrorStream(true);
 
                     daemonProcess = pb.start();
@@ -88,13 +86,12 @@ public class AikuForegroundService extends Service {
                     BufferedReader reader = new BufferedReader(new InputStreamReader(daemonProcess.getInputStream()));
                     String line;
                     while ((line = reader.readLine()) != null) {
-                        Log.i("AIKU_ENGINE", line);
+                        Log.i("AIKU_CORE", line);
                     }
 
-                    int exitCode = daemonProcess.waitFor();
-                    Log.w(TAG, "Core supervisor stopped (" + exitCode + "). Restarting in 2s...");
+                    daemonProcess.waitFor();
                 } catch (Exception e) {
-                    Log.e(TAG, "Daemon error: " + e.getMessage());
+                    Log.e(TAG, "Execution error: " + e.getMessage());
                 }
 
                 if (isRunning) {
@@ -174,7 +171,7 @@ public class AikuForegroundService extends Service {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID,
-                    "Aiku Background Service",
+                    "Aiku Service Core",
                     NotificationManager.IMPORTANCE_MIN
             );
             NotificationManager manager = getSystemService(NotificationManager.class);
@@ -182,21 +179,14 @@ public class AikuForegroundService extends Service {
         }
     }
 
-    private Notification buildNotification(String text) {
-        Intent notificationIntent = new Intent(this, MainActivity.class);
-        PendingIntent pendingIntent = PendingIntent.getActivity(
-                this, 0, notificationIntent,
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0
-        );
-
+    private Notification buildNotification() {
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? new Notification.Builder(this, CHANNEL_ID)
                 : new Notification.Builder(this);
 
-        return builder.setContentTitle("Aiku Service")
-                .setContentText(text)
+        return builder.setContentTitle("Aiku Routing Engine")
+                .setContentText("127.0.0.3:2007 Multiplexer Active")
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
-                .setContentIntent(pendingIntent)
                 .build();
     }
 

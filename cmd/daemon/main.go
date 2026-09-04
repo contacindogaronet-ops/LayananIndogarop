@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -17,6 +19,13 @@ import (
 	"aiku-daemon/internal/logger"
 	"aiku-daemon/internal/supervisor"
 )
+
+func setMaxFDLimit() {
+	var rLimit syscall.Rlimit
+	rLimit.Max = 65535
+	rLimit.Cur = 65535
+	_ = syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
+}
 
 func resolveWorkDir() string {
 	if dataDir := os.Getenv("ANDROID_DATA_DIR"); dataDir != "" {
@@ -35,7 +44,62 @@ func resolveWorkDir() string {
 	return pwd
 }
 
+// startLoopbackBridge meneruskan trafik 127.0.0.1:2007 ke 127.0.0.3:2007 secara transparan
+func startLoopbackBridge(ctx context.Context, listenAddr, targetAddr string, logger *logger.APILogger) {
+	listener, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		return
+	}
+	defer listener.Close()
+
+	logger.Log("BRIDGE", fmt.Sprintf("Active Multiplexer Bridge %s -> %s", listenAddr, targetAddr))
+
+	go func() {
+		<-ctx.Done()
+		_ = listener.Close()
+	}()
+
+	for {
+		clientConn, err := listener.Accept()
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+		}
+
+		go func(c net.Conn) {
+			defer c.Close()
+			targetConn, err := net.DialTimeout("tcp", targetAddr, 2*time.Second)
+			if err != nil {
+				return
+			}
+			defer targetConn.Close()
+
+			var wg sync.WaitGroup
+			wg.Add(2)
+
+			go func() {
+				defer wg.Done()
+				_, _ = io.Copy(targetConn, c)
+			}()
+
+			go func() {
+				defer wg.Done()
+				_, _ = io.Copy(c, targetConn)
+			}()
+
+			wg.Wait()
+		}(clientConn)
+	}
+}
+
 func main() {
+	setMaxFDLimit()
+
 	rootDir := resolveWorkDir()
 	configPath := filepath.Join(rootDir, "config.yaml")
 
@@ -49,14 +113,9 @@ func main() {
 		cfg.Server.Port = 8080
 	}
 
-	// 1. Bersihkan Port Telemetri (8080) dan Port Routing Binary Coba (2007)
-	_ = executor.KillPortHolders(cfg.Server.Port)
-	_ = executor.KillPortHolders(2007)
-
 	apiLogger := logger.NewAPILogger(500)
-	apiLogger.Log("CORE", fmt.Sprintf("Aiku pure daemon started at %s", rootDir))
+	apiLogger.Log("CORE", fmt.Sprintf("Aiku pure daemon initialized at %s", rootDir))
 
-	// Supervisor menjalankan binary 'coba' sejajar di rootDir
 	sup := supervisor.NewSupervisor(cfg, apiLogger, rootDir)
 
 	// API Status
@@ -78,63 +137,38 @@ func main() {
 		apiLogger.ServeHTTPLogs(w, r)
 	})
 
-	// API Shell Exec
-	http.HandleFunc("/api/v1/exec", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		var payload struct {
-			Command string `json:"command"`
-			Timeout int    `json:"timeout"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if payload.Timeout == 0 {
-			payload.Timeout = 5
-		}
-
-		out, err := executor.ExecShell(payload.Command, time.Duration(payload.Timeout)*time.Second)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"output": out,
-			"error":  fmt.Sprint(err),
-		})
-	})
-
-	// Root Ping Handler
+	// Root Ping
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = fmt.Fprintf(w, "<h2>✓ Aiku Network Core is RUNNING</h2><p>Working Dir: %s</p><p><a href='/api/v1/status'>Check Status JSON</a> | <a href='/api/v1/logs'>Check Logs</a></p>", rootDir)
+		_, _ = fmt.Fprintf(w, "<h3>✓ Aiku Daemon Active</h3><p>Multiplexer: 127.0.0.3:2007 | Telemetry: 127.0.0.3:2008</p>")
 	})
 
 	serverAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	server := &http.Server{Addr: serverAddr}
 
 	go func() {
-		apiLogger.Log("SYSTEM", fmt.Sprintf("HTTP Telemetry listening on %s (0.0.0.0:%d)", serverAddr, cfg.Server.Port))
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			apiLogger.Log("FATAL", fmt.Sprintf("HTTP Server bind failed: %v", err))
+			apiLogger.Log("FATAL", fmt.Sprintf("Server failed on %s: %v", serverAddr, err))
 		}
 	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 
+	// Start Subprocesses (Binary Coba)
 	sup.StartAll(ctx, &wg)
+
+	// Start Universal Bridge (Mendukung routing v2rayNG di 127.0.0.1 maupun 127.0.0.3)
+	go startLoopbackBridge(ctx, "127.0.0.1:2007", "127.0.0.3:2007", apiLogger)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	<-sigChan
-	apiLogger.Log("SYSTEM", "Aiku Core shutting down...")
+	apiLogger.Log("SYSTEM", "Aiku Core stopping...")
 
 	cancel()
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer shutdownCancel()
 	_ = server.Shutdown(shutdownCtx)
 
