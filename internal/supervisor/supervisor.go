@@ -1,9 +1,11 @@
 package supervisor
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,7 +45,7 @@ func NewSupervisor(cfg *config.Config, logger *logger.APILogger, workDir string)
 	}
 }
 
-// isELFBinary mengecek apakah file adalah biner Linux/Android ELF asli (bukan xml/json/log)
+// isELFBinary memvalidasi magic header ELF Linux
 func isELFBinary(path string) bool {
 	f, err := os.Open(path)
 	if err != nil {
@@ -60,16 +62,14 @@ func isELFBinary(path string) bool {
 }
 
 func (s *Supervisor) StartAll(ctx context.Context, wg *sync.WaitGroup) {
-	// Bersihkan port routing v2rayNG (2007)
 	_ = executor.KillPortHolders(2007)
 
 	targetBinPath := filepath.Join(s.workDir, "coba")
 
-	// 1. Eksekusi target utama biner: coba
 	if info, err := os.Stat(targetBinPath); err == nil && !info.IsDir() {
 		if isELFBinary(targetBinPath) {
 			_ = os.Chmod(targetBinPath, 0755)
-			s.logger.Log("SUPERVISOR", fmt.Sprintf("Registered primary ELF binary: %s", targetBinPath))
+			s.logger.Log("SUPERVISOR", fmt.Sprintf("Primary binary ready: %s", targetBinPath))
 
 			s.mu.Lock()
 			s.processes["coba"] = &ProcessInfo{
@@ -84,48 +84,10 @@ func (s *Supervisor) StartAll(ctx context.Context, wg *sync.WaitGroup) {
 			wg.Add(1)
 			go s.superviseProcess(ctx, wg, "coba", targetBinPath)
 		} else {
-			s.logger.Log("CRITICAL", fmt.Sprintf("File 'coba' is NOT a valid ELF binary!"))
+			s.logger.Log("CRITICAL", "File 'coba' is not a valid ARM64 ELF binary!")
 		}
 	} else {
 		s.logger.Log("WARNING", fmt.Sprintf("Target binary 'coba' not found in %s", s.workDir))
-	}
-
-	// 2. Scan jika ada ELF binary tambahan khusus (abaikan .xml, .json, .log, .yaml, .env, .dat, .txt)
-	entries, err := os.ReadDir(s.workDir)
-	if err == nil {
-		for _, entry := range entries {
-			name := entry.Name()
-			if entry.IsDir() || name == "coba" || name == "aiku-daemon" {
-				continue
-			}
-
-			// Blacklist ekstensi non-binary
-			if strings.HasSuffix(name, ".xml") || strings.HasSuffix(name, ".json") ||
-				strings.HasSuffix(name, ".log") || strings.HasSuffix(name, ".yaml") ||
-				strings.HasSuffix(name, ".env") || strings.HasSuffix(name, ".dat") ||
-				strings.HasSuffix(name, ".txt") || strings.HasPrefix(name, ".") {
-				continue
-			}
-
-			binPath := filepath.Join(s.workDir, name)
-			if isELFBinary(binPath) {
-				_ = os.Chmod(binPath, 0755)
-				s.logger.Log("SUPERVISOR", fmt.Sprintf("Registered extra ELF binary: %s", name))
-
-				s.mu.Lock()
-				s.processes[name] = &ProcessInfo{
-					Name:      name,
-					Path:      binPath,
-					Status:    "STARTING",
-					Restarts:  0,
-					LastStart: time.Now(),
-				}
-				s.mu.Unlock()
-
-				wg.Add(1)
-				go s.superviseProcess(ctx, wg, name, binPath)
-			}
-		}
 	}
 }
 
@@ -140,14 +102,34 @@ func (s *Supervisor) superviseProcess(ctx context.Context, wg *sync.WaitGroup, n
 		default:
 		}
 
-		s.logger.Log("SUPERVISOR", fmt.Sprintf("Executing binary '%s' (Dir: %s)", name, s.workDir))
+		s.logger.Log("SUPERVISOR", fmt.Sprintf("Launching binary '%s'...", name))
 		s.updateStatus(name, "RUNNING", "")
 
 		cmd := exec.CommandContext(ctx, binPath)
-		cmd.Dir = s.workDir // Sejajar dengan .env, brain.dat, state.json, blocklists/
+		cmd.Dir = s.workDir
+
+		// Inject lengkap Environment Android
+		envMap := os.Environ()
+		envMap = append(envMap,
+			fmt.Sprintf("HOME=%s", s.workDir),
+			fmt.Sprintf("TMPDIR=%s", s.workDir),
+			fmt.Sprintf("ANDROID_DATA_DIR=%s", s.workDir),
+			fmt.Sprintf("PATH=%s:/system/bin:/system/xbin", s.workDir),
+		)
+		cmd.Env = envMap
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-		err := cmd.Start()
+		// Tangkap stdout dan stderr secara real-time
+		stdoutPipe, err := cmd.StdoutPipe()
+		if err != nil {
+			s.logger.Log("ERROR", fmt.Sprintf("Stdout pipe failed: %v", err))
+		}
+		stderrPipe, err := cmd.StderrPipe()
+		if err != nil {
+			s.logger.Log("ERROR", fmt.Sprintf("Stderr pipe failed: %v", err))
+		}
+
+		err = cmd.Start()
 		if err != nil {
 			errMsg := fmt.Sprintf("Failed to spawn %s: %v", name, err)
 			s.logger.Log("CRITICAL", errMsg)
@@ -157,18 +139,39 @@ func (s *Supervisor) superviseProcess(ctx context.Context, wg *sync.WaitGroup, n
 			continue
 		}
 
+		// Stream stdout
+		if stdoutPipe != nil {
+			go s.streamOutput(name, stdoutPipe, "INFO")
+		}
+		// Stream stderr
+		if stderrPipe != nil {
+			go s.streamOutput(name, stderrPipe, "ERR")
+		}
+
 		err = cmd.Wait()
 		if ctx.Err() != nil {
 			return
 		}
 
-		errMsg := fmt.Sprintf("Process %s died (%v). Re-killing port 2007 & auto-restarting in 2s...", name, err)
+		errMsg := fmt.Sprintf("Process %s died: %v. Auto-restarting in 2s...", name, err)
 		s.logger.Log("WARNING", errMsg)
+
+		// Bersihkan port 2007 jika tertahan oleh zombie process
 		_ = executor.KillPortHolders(2007)
 
 		s.incrementRestart(name)
 		s.updateStatus(name, "CRASHED_RESTARTING", errMsg)
 		time.Sleep(2 * time.Second)
+	}
+}
+
+func (s *Supervisor) streamOutput(name string, r io.Reader, level string) {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		text := strings.TrimSpace(scanner.Text())
+		if text != "" {
+			s.logger.Log(fmt.Sprintf("%s:%s", strings.ToUpper(name), level), text)
+		}
 	}
 }
 
