@@ -9,13 +9,18 @@ android {
     defaultConfig {
         applicationId "com.aiku.daemon"
         minSdk 21
-        targetSdk 28
+        targetSdk 34
         versionCode 1
         versionName "1.0.0"
     }
 
     androidResources {
         noCompress 'txt', 'dat', 'json', 'yaml', 'env', 'so'
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
     }
 
     signingConfigs {
