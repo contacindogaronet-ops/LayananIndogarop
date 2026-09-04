@@ -1,4 +1,4 @@
-name: "Production Release & Auto-Sign APK"
+name: "Indogaro Production Build & Release"
 
 on:
   push:
@@ -11,11 +11,27 @@ on:
     branches:
       - "master"
       - "main"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Manual Tag/Version Name (contoh: 1.0.0)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  packages: write
+  actions: write
+  id-token: write
 
 jobs:
   build-and-release:
-    name: "Build Signed APK & Publish Release"
+    name: "Build Signed Headless APK & Publish"
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      actions: write
 
     steps:
       - name: "Checkout Repository"
@@ -43,26 +59,37 @@ jobs:
         run: |
           RUN_NUM="${{ github.run_number }}"
           V_CODE=$((100 + RUN_NUM))
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+          
+          if [ -n "${{ github.event.inputs.tag_name }}" ]; then
+            V_NAME="${{ github.event.inputs.tag_name }}"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             V_NAME="${GITHUB_REF#refs/tags/v}"
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            V_NAME="${GITHUB_REF#refs/tags/}"
           else
             V_NAME="1.0.${RUN_NUM}"
           fi
+
+          # Strip leading 'v' if present for clean semantic string
+          V_NAME="${V_NAME#v}"
+
           echo "VERSION_CODE=$V_CODE" >> $GITHUB_ENV
           echo "VERSION_NAME=$V_NAME" >> $GITHUB_ENV
+          echo "Determined Version Name: $V_NAME"
+          echo "Determined Version Code: $V_CODE"
 
-      - name: "Prepare Persistent Keystore & Gradle Properties"
+      - name: "Prepare Keystore & AndroidX Properties"
         run: |
           mkdir -p android/app
-          # Ensure gradle.properties exists with AndroidX enabled
           echo "android.useAndroidX=true" > android/gradle.properties
           echo "android.enableJetifier=true" >> android/gradle.properties
+          echo "org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8" >> android/gradle.properties
 
           if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
-            echo "Decoding repository keystore secret..."
+            echo "Decoding persistent keystore from repository secrets..."
             echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.keystore
           else
-            echo "Generating fallback keystore..."
+            echo "Generating fallback build keystore..."
             keytool -genkeypair -v \
               -keystore android/app/release.keystore \
               -alias aikukey \
@@ -72,10 +99,10 @@ jobs:
               -storepass aikurelease2026 \
               -keypass aikurelease2026 \
               -storetype PKCS12 \
-              -dname "CN=AikuService, OU=NetworkCore, O=Aiku, L=Jakarta, ST=ID, C=ID"
+              -dname "CN=IndogaroService, OU=NetworkCore, O=Indogaro, L=Jakarta, ST=ID, C=ID"
           fi
 
-      - name: "Compile Go Daemon & Bundle Assets"
+      - name: "Compile Go Native Supervisor & Assets"
         run: |
           go mod tidy
           mkdir -p android/app/src/main/assets
@@ -85,14 +112,14 @@ jobs:
             -ldflags="-s -w -X aiku-daemon/internal/updater.CurrentVersion=v${{ env.VERSION_NAME }}" \
             -o android/app/src/main/assets/aiku-daemon ./cmd/daemon
 
-          # Bundle Binary coba
+          # Copy biner pendukung (coba) jika tersedia
           if [ -f bin/coba ]; then
             cp bin/coba android/app/src/main/assets/coba
           elif [ -f coba ]; then
             cp coba android/app/src/main/assets/coba
           fi
 
-          # Bundle .env via app.env alias
+          # Copy .env via app.env asset bundle
           if [ -f .env ]; then
             cp .env android/app/src/main/assets/app.env
           else
@@ -109,7 +136,7 @@ jobs:
             mkdir -p android/app/src/main/assets/blocklists
           fi
 
-      - name: "Assemble Signed APK via Gradle"
+      - name: "Assemble Signed Release APK"
         env:
           KEYSTORE_PATH: "release.keystore"
           KEYSTORE_STORE_PASSWORD: "aikurelease2026"
@@ -122,22 +149,25 @@ jobs:
           gradle wrapper --gradle-version 8.5
           chmod +x gradlew
           ./gradlew assembleRelease --no-daemon
+          cd ..
+          mkdir -p release-output
+          cp android/app/build/outputs/apk/release/app-release.apk release-output/indogaro-service-v${{ env.VERSION_NAME }}.apk
 
-      - name: "Upload Artifacts"
+      - name: "Upload Artifacts to Workflow Run"
         uses: actions/upload-artifact@v4
         with:
-          name: "aiku-service-${{ env.VERSION_NAME }}.apk"
-          path: android/app/build/outputs/apk/release/app-release.apk
+          name: "indogaro-service-v${{ env.VERSION_NAME }}.apk"
+          path: release-output/indogaro-service-v${{ env.VERSION_NAME }}.apk
 
-      - name: "Create GitHub Release (Trigger on Tag or [release] commit)"
-        if: startsWith(github.ref, 'refs/tags/v') || contains(github.event.head_commit.message, '[release]')
+      - name: "Publish Official GitHub Release"
+        if: startsWith(github.ref, 'refs/tags/v') || contains(github.event.head_commit.message, '[release]') || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ env.VERSION_NAME }}
-          name: "Release v${{ env.VERSION_NAME }}"
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', env.VERSION_NAME) }}
+          name: "Indogaro Core Service ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', env.VERSION_NAME) }}"
           draft: false
           prerelease: false
+          generate_release_notes: true
           files: |
-            android/app/build/outputs/apk/release/app-release.apk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            release-output/indogaro-service-v${{ env.VERSION_NAME }}.apk
