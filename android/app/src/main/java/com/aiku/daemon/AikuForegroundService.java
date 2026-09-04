@@ -20,7 +20,7 @@ import java.io.OutputStream;
 
 public class AikuForegroundService extends Service {
     private static final String TAG = "AikuCore";
-    private static final String CHANNEL_ID = "aiku_silent_service";
+    private static final String CHANNEL_ID = "aiku_service_channel";
     private Process daemonProcess;
     private Thread supervisorThread;
     private PowerManager.WakeLock wakeLock;
@@ -54,7 +54,7 @@ public class AikuForegroundService extends Service {
     private void startDaemonSupervisor() {
         supervisorThread = new Thread(() -> {
             File rootDir = getFilesDir();
-            Log.i(TAG, "Starting pure ghost daemon in: " + rootDir.getAbsolutePath());
+            Log.i(TAG, "Starting pure daemon core at: " + rootDir.getAbsolutePath());
 
             extractAssetsFlat(rootDir);
             ensureEnvFile(rootDir);
@@ -86,12 +86,13 @@ public class AikuForegroundService extends Service {
                     BufferedReader reader = new BufferedReader(new InputStreamReader(daemonProcess.getInputStream()));
                     String line;
                     while ((line = reader.readLine()) != null) {
-                        Log.i("AIKU_CORE", line);
+                        Log.i("AIKU_DAEMON", line);
                     }
 
-                    daemonProcess.waitFor();
+                    int exitCode = daemonProcess.waitFor();
+                    Log.w(TAG, "Daemon stopped (" + exitCode + "). Restarting in 2s...");
                 } catch (Exception e) {
-                    Log.e(TAG, "Execution error: " + e.getMessage());
+                    Log.e(TAG, "Supervisor execution error: " + e.getMessage());
                 }
 
                 if (isRunning) {
@@ -171,7 +172,7 @@ public class AikuForegroundService extends Service {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID,
-                    "Aiku Service Core",
+                    "Aiku Service Channel",
                     NotificationManager.IMPORTANCE_MIN
             );
             NotificationManager manager = getSystemService(NotificationManager.class);
@@ -184,8 +185,8 @@ public class AikuForegroundService extends Service {
                 ? new Notification.Builder(this, CHANNEL_ID)
                 : new Notification.Builder(this);
 
-        return builder.setContentTitle("Aiku Routing Engine")
-                .setContentText("127.0.0.3:2007 Multiplexer Active")
+        return builder.setContentTitle("Aiku Service Engine")
+                .setContentText("127.0.0.3:2007 & 2008 Active")
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .build();
     }
