@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"aiku-daemon/internal/config"
-	"aiku-daemon/internal/executor"
 	"aiku-daemon/internal/logger"
 	"aiku-daemon/internal/supervisor"
 )
