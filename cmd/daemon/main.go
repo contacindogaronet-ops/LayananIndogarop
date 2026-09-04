@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -41,59 +39,6 @@ func resolveWorkDir() string {
 
 	pwd, _ := os.Getwd()
 	return pwd
-}
-
-// startLoopbackBridge meneruskan trafik 127.0.0.1:2007 ke 127.0.0.3:2007 secara transparan
-func startLoopbackBridge(ctx context.Context, listenAddr, targetAddr string, logger *logger.APILogger) {
-	listener, err := net.Listen("tcp", listenAddr)
-	if err != nil {
-		return
-	}
-	defer listener.Close()
-
-	logger.Log("BRIDGE", fmt.Sprintf("Active Multiplexer Bridge %s -> %s", listenAddr, targetAddr))
-
-	go func() {
-		<-ctx.Done()
-		_ = listener.Close()
-	}()
-
-	for {
-		clientConn, err := listener.Accept()
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				time.Sleep(100 * time.Millisecond)
-				continue
-			}
-		}
-
-		go func(c net.Conn) {
-			defer c.Close()
-			targetConn, err := net.DialTimeout("tcp", targetAddr, 2*time.Second)
-			if err != nil {
-				return
-			}
-			defer targetConn.Close()
-
-			var wg sync.WaitGroup
-			wg.Add(2)
-
-			go func() {
-				defer wg.Done()
-				_, _ = io.Copy(targetConn, c)
-			}()
-
-			go func() {
-				defer wg.Done()
-				_, _ = io.Copy(c, targetConn)
-			}()
-
-			wg.Wait()
-		}(clientConn)
-	}
 }
 
 func main() {
@@ -154,11 +99,8 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 
-	// Start Subprocesses (Binary Coba)
+	// Jalankan binary 'coba'
 	sup.StartAll(ctx, &wg)
-
-	// Start Universal Bridge (Mendukung routing v2rayNG di 127.0.0.1 maupun 127.0.0.3)
-	go startLoopbackBridge(ctx, "127.0.0.1:2007", "127.0.0.3:2007", apiLogger)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
