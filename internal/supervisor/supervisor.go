@@ -45,7 +45,6 @@ func NewSupervisor(cfg *config.Config, logger *logger.APILogger, workDir string)
 	}
 }
 
-// isELFBinary memvalidasi magic header ELF Linux
 func isELFBinary(path string) bool {
 	f, err := os.Open(path)
 	if err != nil {
@@ -61,15 +60,21 @@ func isELFBinary(path string) bool {
 	return bytes.Equal(header, []byte{0x7F, 'E', 'L', 'F'})
 }
 
-func (s *Supervisor) StartAll(ctx context.Context, wg *sync.WaitGroup) {
+func (s *Supervisor) cleanupRoutingPorts() {
 	_ = executor.KillPortHolders(2007)
+	_ = executor.KillPortHolders(2008)
+	time.Sleep(200 * time.Millisecond) // Jeda pelepasan socket TCP di kernel
+}
+
+func (s *Supervisor) StartAll(ctx context.Context, wg *sync.WaitGroup) {
+	s.cleanupRoutingPorts()
 
 	targetBinPath := filepath.Join(s.workDir, "coba")
 
 	if info, err := os.Stat(targetBinPath); err == nil && !info.IsDir() {
 		if isELFBinary(targetBinPath) {
 			_ = os.Chmod(targetBinPath, 0755)
-			s.logger.Log("SUPERVISOR", fmt.Sprintf("Primary binary ready: %s", targetBinPath))
+			s.logger.Log("SUPERVISOR", fmt.Sprintf("Primary binary validated: %s", targetBinPath))
 
 			s.mu.Lock()
 			s.processes["coba"] = &ProcessInfo{
@@ -84,10 +89,10 @@ func (s *Supervisor) StartAll(ctx context.Context, wg *sync.WaitGroup) {
 			wg.Add(1)
 			go s.superviseProcess(ctx, wg, "coba", targetBinPath)
 		} else {
-			s.logger.Log("CRITICAL", "File 'coba' is not a valid ARM64 ELF binary!")
+			s.logger.Log("CRITICAL", "Binary 'coba' is not a valid ARM64 ELF binary!")
 		}
 	} else {
-		s.logger.Log("WARNING", fmt.Sprintf("Target binary 'coba' not found in %s", s.workDir))
+		s.logger.Log("WARNING", fmt.Sprintf("Binary 'coba' not found in %s", s.workDir))
 	}
 }
 
@@ -97,10 +102,14 @@ func (s *Supervisor) superviseProcess(ctx context.Context, wg *sync.WaitGroup, n
 	for {
 		select {
 		case <-ctx.Done():
+			s.cleanupRoutingPorts()
 			s.updateStatus(name, "STOPPED", "")
 			return
 		default:
 		}
+
+		// Pastikan port 2007 & 2008 selalu bersih sebelum biner di-spawn
+		s.cleanupRoutingPorts()
 
 		s.logger.Log("SUPERVISOR", fmt.Sprintf("Launching binary '%s'...", name))
 		s.updateStatus(name, "RUNNING", "")
@@ -108,7 +117,7 @@ func (s *Supervisor) superviseProcess(ctx context.Context, wg *sync.WaitGroup, n
 		cmd := exec.CommandContext(ctx, binPath)
 		cmd.Dir = s.workDir
 
-		// Inject lengkap Environment Android
+		// Environment injection
 		envMap := os.Environ()
 		envMap = append(envMap,
 			fmt.Sprintf("HOME=%s", s.workDir),
@@ -119,17 +128,10 @@ func (s *Supervisor) superviseProcess(ctx context.Context, wg *sync.WaitGroup, n
 		cmd.Env = envMap
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-		// Tangkap stdout dan stderr secara real-time
-		stdoutPipe, err := cmd.StdoutPipe()
-		if err != nil {
-			s.logger.Log("ERROR", fmt.Sprintf("Stdout pipe failed: %v", err))
-		}
-		stderrPipe, err := cmd.StderrPipe()
-		if err != nil {
-			s.logger.Log("ERROR", fmt.Sprintf("Stderr pipe failed: %v", err))
-		}
+		stdoutPipe, _ := cmd.StdoutPipe()
+		stderrPipe, _ := cmd.StderrPipe()
 
-		err = cmd.Start()
+		err := cmd.Start()
 		if err != nil {
 			errMsg := fmt.Sprintf("Failed to spawn %s: %v", name, err)
 			s.logger.Log("CRITICAL", errMsg)
@@ -139,11 +141,9 @@ func (s *Supervisor) superviseProcess(ctx context.Context, wg *sync.WaitGroup, n
 			continue
 		}
 
-		// Stream stdout
 		if stdoutPipe != nil {
 			go s.streamOutput(name, stdoutPipe, "INFO")
 		}
-		// Stream stderr
 		if stderrPipe != nil {
 			go s.streamOutput(name, stderrPipe, "ERR")
 		}
@@ -153,12 +153,10 @@ func (s *Supervisor) superviseProcess(ctx context.Context, wg *sync.WaitGroup, n
 			return
 		}
 
-		errMsg := fmt.Sprintf("Process %s died: %v. Auto-restarting in 2s...", name, err)
+		errMsg := fmt.Sprintf("Process %s exited (%v). Releasing ports 2007/2008 & auto-restarting in 2s...", name, err)
 		s.logger.Log("WARNING", errMsg)
 
-		// Bersihkan port 2007 jika tertahan oleh zombie process
-		_ = executor.KillPortHolders(2007)
-
+		s.cleanupRoutingPorts()
 		s.incrementRestart(name)
 		s.updateStatus(name, "CRASHED_RESTARTING", errMsg)
 		time.Sleep(2 * time.Second)

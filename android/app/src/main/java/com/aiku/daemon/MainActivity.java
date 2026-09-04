@@ -87,11 +87,13 @@ public class MainActivity extends Activity {
 
     private void testPorts() {
         new Thread(() -> {
-            boolean port8080 = checkSocket("127.0.0.1", 8080);
+            boolean portDaemon = checkSocket("127.0.0.1", 8080);
             boolean port2007 = checkSocket("127.0.0.3", 2007);
+            boolean port2008 = checkSocket("127.0.0.3", 2008);
 
-            String res = "Test Result:\n- 127.0.0.1:8080 (Daemon API): " + (port8080 ? "ONLINE [OK]" : "REFUSED / DOWN")
-                    + "\n- 127.0.0.3:2007 (Binary Coba): " + (port2007 ? "ONLINE [OK]" : "REFUSED / DOWN");
+            String res = "Test Result:\n- 127.0.0.1:8080 (Daemon API): " + (portDaemon ? "ONLINE [OK]" : "DOWN")
+                    + "\n- 127.0.0.3:2007 (V2Ray Multiplexer): " + (port2007 ? "ONLINE [OK]" : "DOWN")
+                    + "\n- 127.0.0.3:2008 (Dashboard Telemetry): " + (port2008 ? "ONLINE [OK]" : "DOWN");
 
             handler.post(() -> tvStatus.setText(res));
         }).start();
@@ -99,7 +101,7 @@ public class MainActivity extends Activity {
 
     private boolean checkSocket(String host, int port) {
         try (Socket s = new Socket()) {
-            s.connect(new InetSocketAddress(host, port), 1000);
+            s.connect(new InetSocketAddress(host, port), 800);
             return true;
         } catch (Exception e) {
             return false;
