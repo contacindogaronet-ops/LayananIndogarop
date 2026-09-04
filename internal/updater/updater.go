@@ -4,113 +4,136 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
-
-	"aiku-daemon/internal/logger"
 )
 
-// Version otomatis diinjeksi saat build via -ldflags="-X aiku-daemon/internal/updater.CurrentVersion=..."
-var CurrentVersion = "v1.0.0"
+var (
+	// CurrentVersion diinjeksi saat build via ldflags (-X ...CurrentVersion=v1.0.0)
+	CurrentVersion = "v1.0.0"
+	// CheckInterval interval pengecekan update otomatis
+	CheckInterval = 30 * time.Minute
+)
 
 type GitHubRelease struct {
 	TagName string `json:"tag_name"`
+	Name    string `json:"name"`
 	Assets  []struct {
 		Name               string `json:"name"`
 		BrowserDownloadURL string `json:"browser_download_url"`
-		Size               int64  `json:"size"`
 	} `json:"assets"`
 }
 
-type AutoUpdater struct {
-	logger  *logger.APILogger
-	workDir string
-	repo    string
-}
-
-func NewAutoUpdater(logger *logger.APILogger, workDir string) *AutoUpdater {
-	repo := os.Getenv("GITHUB_REPOSITORY")
-	return &AutoUpdater{
-		logger:  logger,
-		workDir: workDir,
-		repo:    repo,
+// StartAutoUpdater berjalan di latar belakang untuk memantau GitHub Release
+func StartAutoUpdater(dataDir, repoOwner, repoName string) {
+	if repoOwner == "" || repoName == "" {
+		repoOwner = "indogaro"
+		repoName = "service"
 	}
-}
 
-func (u *AutoUpdater) StartWorker() {
+	ticker := time.NewTicker(CheckInterval)
 	go func() {
+		// Pengecekan awal saat daemon baru menyala (setelah delay 30 detik agar network stabil)
 		time.Sleep(30 * time.Second)
-		for {
-			u.checkAndUpdate()
-			time.Sleep(30 * time.Minute)
+		checkForUpdate(dataDir, repoOwner, repoName)
+
+		for range ticker.C {
+			checkForUpdate(dataDir, repoOwner, repoName)
 		}
 	}()
 }
 
-func (u *AutoUpdater) checkAndUpdate() {
-	if u.repo == "" {
-		return
-	}
+func checkForUpdate(dataDir, repoOwner, repoName string) {
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName)
+	client := &http.Client{Timeout: 20 * time.Second}
 
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", u.repo)
-	client := &http.Client{Timeout: 15 * time.Second}
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
 		return
 	}
-	req.Header.Set("User-Agent", "Aiku-Daemon-Engine")
+	req.Header.Set("User-Agent", "Indogaro-Daemon-Updater")
 
 	resp, err := client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
+	if err != nil {
 		return
 	}
 	defer resp.Body.Close()
 
-	var rel GitHubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+	if resp.StatusCode != http.StatusOK {
 		return
 	}
 
-	latestTag := strings.TrimPrefix(rel.TagName, "v")
-	currentTag := strings.TrimPrefix(CurrentVersion, "v")
+	var release GitHubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return
+	}
 
-	if latestTag != "" && latestTag != currentTag {
-		u.logger.Log("UPDATER", fmt.Sprintf("New release available: v%s (Current: v%s)", latestTag, currentTag))
-		for _, asset := range rel.Assets {
+	latestTag := strings.TrimSpace(release.TagName)
+	if isNewerVersion(CurrentVersion, latestTag) {
+		log.Printf("[UPDATER] Versi baru terdeteksi: %s (Versi aktif: %s)", latestTag, CurrentVersion)
+
+		var downloadURL string
+		for _, asset := range release.Assets {
 			if strings.HasSuffix(asset.Name, ".apk") {
-				u.downloadAPK(asset.BrowserDownloadURL, asset.Size)
+				downloadURL = asset.BrowserDownloadURL
 				break
 			}
+		}
+
+		if downloadURL != "" {
+			downloadAndTriggerUpdate(dataDir, downloadURL)
 		}
 	}
 }
 
-func (u *AutoUpdater) downloadAPK(downloadURL string, expectedSize int64) {
-	outPath := filepath.Join(u.workDir, "update.apk")
-	resp, err := http.Get(downloadURL)
+func isNewerVersion(current, latest string) bool {
+	cleanCur := strings.TrimPrefix(strings.TrimSpace(current), "v")
+	cleanLat := strings.TrimPrefix(strings.TrimSpace(latest), "v")
+
+	if cleanCur == "" || cleanLat == "" {
+		return false
+	}
+	return cleanCur != cleanLat
+}
+
+func downloadAndTriggerUpdate(dataDir, downloadURL string) {
+	apkPath := filepath.Join(dataDir, "update.apk")
+	sigPath := filepath.Join(dataDir, "trigger_update.sig")
+
+	// 1. Download file APK
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Get(downloadURL)
 	if err != nil {
-		u.logger.Log("UPDATER", fmt.Sprintf("Download failed: %v", err))
+		log.Printf("[UPDATER] Gagal mengunduh APK: %v", err)
 		return
 	}
 	defer resp.Body.Close()
 
-	out, err := os.Create(outPath)
+	out, err := os.Create(apkPath)
 	if err != nil {
+		log.Printf("[UPDATER] Gagal membuat file target APK: %v", err)
 		return
 	}
 	defer out.Close()
 
-	written, err := io.Copy(out, resp.Body)
-	if err != nil || (expectedSize > 0 && written != expectedSize) {
-		u.logger.Log("UPDATER", "Update payload incomplete/corrupted. Discarding.")
-		_ = os.Remove(outPath)
+	_, err = io.Copy(out, resp.Body)
+	if err != nil {
+		log.Printf("[UPDATER] Gagal menulis stream APK: %v", err)
 		return
 	}
 
-	u.logger.Log("UPDATER", fmt.Sprintf("Update APK verified & saved to %s", outPath))
-	// Tulis trigger update signal untuk dibaca Java Service
-	_ = os.WriteFile(filepath.Join(u.workDir, "trigger_update.sig"), []byte("READY"), 0644)
+	// 2. Beri izin read file APK
+	_ = os.Chmod(apkPath, 0644)
+
+	// 3. Tulis trigger file agar Java Foreground Service mengeksekusi install intent
+	if err := os.WriteFile(sigPath, []byte(time.Now().String()), 0644); err != nil {
+		log.Printf("[UPDATER] Gagal menulis trigger signal: %v", err)
+		return
+	}
+
+	log.Printf("[UPDATER] Sinyal update berhasil dikirim ke IndogaroForegroundService")
 }
