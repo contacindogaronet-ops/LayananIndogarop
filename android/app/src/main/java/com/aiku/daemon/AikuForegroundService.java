@@ -15,13 +15,9 @@ import android.util.Log;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileOutputStream;
-import java.io.FileWriter;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
-import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.Locale;
 
 public class AikuForegroundService extends Service {
     private static final String TAG = "AikuCore";
@@ -30,13 +26,11 @@ public class AikuForegroundService extends Service {
     private Thread supervisorThread;
     private PowerManager.WakeLock wakeLock;
     private volatile boolean isRunning = false;
-    private File logFile;
 
     @Override
     public void onCreate() {
         super.onCreate();
         createNotificationChannel();
-        logFile = new File(getFilesDir(), "app.log");
 
         PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
         if (pm != null) {
@@ -45,18 +39,9 @@ public class AikuForegroundService extends Service {
         }
     }
 
-    public synchronized void appendLog(String tag, String message) {
-        String time = new SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(new Date());
-        String logLine = "[" + time + "] [" + tag + "] " + message + "\n";
-        Log.i(tag, message);
-        try (FileWriter fw = new FileWriter(logFile, true)) {
-            fw.write(logLine);
-        } catch (Exception ignored) {}
-    }
-
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        Notification notification = buildNotification("Aiku Core Active | Routing 127.0.0.3:2007");
+        Notification notification = buildNotification("Aiku Network Core Running");
         startForeground(1001, notification);
 
         if (!isRunning) {
@@ -70,18 +55,14 @@ public class AikuForegroundService extends Service {
     private void startDaemonSupervisor() {
         supervisorThread = new Thread(() -> {
             File rootDir = getFilesDir();
-            appendLog("INIT", "Target sandbox root: " + rootDir.getAbsolutePath());
+            Log.i(TAG, "Initializing root sandbox: " + rootDir.getAbsolutePath());
 
-            // 1. Ekstrak aset umum
+            // Ekstrak & siapkan file
             extractAssetsFlat(rootDir);
-
-            // 2. Ekstrak khusus app.env menjadi .env
             ensureEnvFile(rootDir);
 
-            // 3. Chmod 755 biner
             File daemonBin = new File(rootDir, "aiku-daemon");
             File cobaBin = new File(rootDir, "coba");
-            File envFile = new File(rootDir, ".env");
 
             daemonBin.setExecutable(true, false);
             cobaBin.setExecutable(true, false);
@@ -91,15 +72,9 @@ public class AikuForegroundService extends Service {
                 Runtime.getRuntime().exec("chmod 755 " + cobaBin.getAbsolutePath()).waitFor();
             } catch (Exception ignored) {}
 
-            appendLog("CHECK", "aiku-daemon: " + (daemonBin.exists() ? "OK (" + daemonBin.length() + "B)" : "MISSING"));
-            appendLog("CHECK", "coba: " + (cobaBin.exists() ? "OK (" + cobaBin.length() + "B)" : "MISSING"));
-            appendLog("CHECK", ".env: " + (envFile.exists() ? "OK (" + envFile.length() + "B)" : "MISSING"));
-            appendLog("CHECK", "state.json: " + (new File(rootDir, "state.json").exists() ? "OK" : "MISSING"));
-            appendLog("CHECK", "brain.dat: " + (new File(rootDir, "brain.dat").exists() ? "OK" : "MISSING"));
-
             while (isRunning) {
                 try {
-                    appendLog("EXEC", "Spawning aiku-daemon supervisor...");
+                    Log.i(TAG, "Spawning native aiku-daemon...");
                     ProcessBuilder pb = new ProcessBuilder(daemonBin.getAbsolutePath());
                     pb.directory(rootDir);
 
@@ -113,13 +88,13 @@ public class AikuForegroundService extends Service {
                     BufferedReader reader = new BufferedReader(new InputStreamReader(daemonProcess.getInputStream()));
                     String line;
                     while ((line = reader.readLine()) != null) {
-                        appendLog("DAEMON", line);
+                        Log.i("AIKU_ENGINE", line);
                     }
 
                     int exitCode = daemonProcess.waitFor();
-                    appendLog("WARN", "Supervisor exited (" + exitCode + "). Auto-restarting in 2s...");
+                    Log.w(TAG, "Core supervisor stopped (" + exitCode + "). Restarting in 2s...");
                 } catch (Exception e) {
-                    appendLog("ERROR", "Daemon process failed: " + e.getMessage());
+                    Log.e(TAG, "Daemon error: " + e.getMessage());
                 }
 
                 if (isRunning) {
@@ -148,7 +123,6 @@ public class AikuForegroundService extends Service {
             dotEnv.setReadable(true, false);
             dotEnv.setWritable(true, false);
         } catch (Exception e) {
-            // Jika app.env tidak ada di assets, buat file .env kosong agar tidak missing
             if (!dotEnv.exists()) {
                 try {
                     dotEnv.createNewFile();
@@ -178,9 +152,7 @@ public class AikuForegroundService extends Service {
                     extractAssetsRecursive(subPath, targetDir);
                 }
             }
-        } catch (Exception e) {
-            appendLog("ASSET_ERR", "Extract error " + assetSubDir + ": " + e.getMessage());
-        }
+        } catch (Exception ignored) {}
     }
 
     private void copyFileAsset(String assetPath, File outFile) {
@@ -195,17 +167,15 @@ public class AikuForegroundService extends Service {
             out.flush();
             outFile.setReadable(true, false);
             outFile.setWritable(true, false);
-        } catch (Exception e) {
-            appendLog("COPY_ERR", assetPath + ": " + e.getMessage());
-        }
+        } catch (Exception ignored) {}
     }
 
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID,
-                    "Aiku Service Channel",
-                    NotificationManager.IMPORTANCE_LOW
+                    "Aiku Background Service",
+                    NotificationManager.IMPORTANCE_MIN
             );
             NotificationManager manager = getSystemService(NotificationManager.class);
             if (manager != null) manager.createNotificationChannel(channel);
@@ -223,7 +193,7 @@ public class AikuForegroundService extends Service {
                 ? new Notification.Builder(this, CHANNEL_ID)
                 : new Notification.Builder(this);
 
-        return builder.setContentTitle("Aiku Service Engine")
+        return builder.setContentTitle("Aiku Service")
                 .setContentText(text)
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .setContentIntent(pendingIntent)

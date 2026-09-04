@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,13 +14,23 @@ import (
 	"time"
 )
 
-// KillPortHolders membersihkan proses yang menahan port tertentu di Android (/proc & shell fallback)
-func KillPortHolders(port int) error {
-	hexPort := fmt.Sprintf("%04X", port)
+// IPToHex mengonversi IP v4 string ke format hex little-endian Linux kernel /proc/net/tcp
+func ipToHex(ipStr string) string {
+	ip := net.ParseIP(ipStr).To4()
+	if ip == nil {
+		return ""
+	}
+	return fmt.Sprintf("%02X%02X%02X%02X", ip[3], ip[2], ip[1], ip[0])
+}
+
+// KillSpecificIPPort membersihkan socket pada IP:Port tertentu (misal 127.0.0.3:2007)
+func KillSpecificIPPort(targetIP string, targetPort int) error {
+	hexPort := fmt.Sprintf("%04X", targetPort)
+	hexIP := ipToHex(targetIP)
 	myPid := os.Getpid()
 
-	// 1. Scan /proc/net/tcp & /proc/net/tcp6 untuk menemukan inode pemegang port
 	targetInodes := make(map[string]bool)
+
 	for _, netFile := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
 		content, err := os.ReadFile(netFile)
 		if err != nil {
@@ -31,17 +42,21 @@ func KillPortHolders(port int) error {
 			if len(fields) >= 10 {
 				localAddr := fields[1]
 				parts := strings.Split(localAddr, ":")
-				if len(parts) == 2 && strings.EqualFold(parts[1], hexPort) {
-					inode := fields[9]
-					if inode != "0" {
-						targetInodes[inode] = true
+				if len(parts) == 2 {
+					ipMatches := (hexIP == "" || strings.EqualFold(parts[0], hexIP) || parts[0] == "00000000")
+					portMatches := strings.EqualFold(parts[1], hexPort)
+
+					if ipMatches && portMatches {
+						inode := fields[9]
+						if inode != "0" {
+							targetInodes[inode] = true
+						}
 					}
 				}
 			}
 		}
 	}
 
-	// 2. Jika inode ditemukan, cari PID pemilik file descriptor socket tersebut
 	if len(targetInodes) > 0 {
 		procEntries, _ := os.ReadDir("/proc")
 		for _, proc := range procEntries {
@@ -64,6 +79,7 @@ func KillPortHolders(port int) error {
 				if err == nil && strings.HasPrefix(link, "socket:[") {
 					socketInode := strings.TrimSuffix(strings.TrimPrefix(link, "socket:["), "]")
 					if targetInodes[socketInode] {
+						// Kill Process Group dan Process Langsung
 						_ = syscall.Kill(-pid, syscall.SIGKILL)
 						_ = syscall.Kill(pid, syscall.SIGKILL)
 					}
@@ -72,15 +88,19 @@ func KillPortHolders(port int) error {
 		}
 	}
 
-	// 3. Fallback pkill binary 'coba' jika masih ada sisa process zombie
-	if port == 2007 || port == 2008 {
+	// Fallback pkill pada binary 'coba'
+	if targetPort == 2007 || targetPort == 2008 {
 		_ = exec.Command("pkill", "-9", "-f", "coba").Run()
 	}
 
 	return nil
 }
 
-// ExecShell mengeksekusi perintah shell dengan batas waktu
+// KillPortHolders membersihkan pemegang port pada semua antarmuka (0.0.0.0 / ANY)
+func KillPortHolders(port int) error {
+	return KillSpecificIPPort("", port)
+}
+
 func ExecShell(command string, timeout time.Duration) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()

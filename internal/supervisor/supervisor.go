@@ -20,12 +20,13 @@ import (
 )
 
 type ProcessInfo struct {
-	Name      string    `json:"name"`
-	Path      string    `json:"path"`
-	Status    string    `json:"status"`
-	Restarts  int       `json:"restarts"`
-	LastStart time.Time `json:"last_start"`
-	LastError string    `json:"last_error,omitempty"`
+	Name             string    `json:"name"`
+	Path             string    `json:"path"`
+	Status           string    `json:"status"`
+	Restarts         int       `json:"restarts"`
+	ConsecutiveFails int       `json:"consecutive_fails"`
+	LastStart        time.Time `json:"last_start"`
+	LastError        string    `json:"last_error,omitempty"`
 }
 
 type Supervisor struct {
@@ -60,14 +61,17 @@ func isELFBinary(path string) bool {
 	return bytes.Equal(header, []byte{0x7F, 'E', 'L', 'F'})
 }
 
-func (s *Supervisor) cleanupRoutingPorts() {
+// CleanRoutingPorts membunuh socket di 127.0.0.3:2007 dan 127.0.0.3:2008
+func (s *Supervisor) CleanRoutingPorts() {
+	_ = executor.KillSpecificIPPort("127.0.0.3", 2007)
+	_ = executor.KillSpecificIPPort("127.0.0.3", 2008)
 	_ = executor.KillPortHolders(2007)
 	_ = executor.KillPortHolders(2008)
-	time.Sleep(200 * time.Millisecond) // Jeda pelepasan socket TCP di kernel
+	time.Sleep(300 * time.Millisecond)
 }
 
 func (s *Supervisor) StartAll(ctx context.Context, wg *sync.WaitGroup) {
-	s.cleanupRoutingPorts()
+	s.CleanRoutingPorts()
 
 	targetBinPath := filepath.Join(s.workDir, "coba")
 
@@ -78,11 +82,12 @@ func (s *Supervisor) StartAll(ctx context.Context, wg *sync.WaitGroup) {
 
 			s.mu.Lock()
 			s.processes["coba"] = &ProcessInfo{
-				Name:      "coba",
-				Path:      targetBinPath,
-				Status:    "STARTING",
-				Restarts:  0,
-				LastStart: time.Now(),
+				Name:             "coba",
+				Path:             targetBinPath,
+				Status:           "STARTING",
+				Restarts:         0,
+				ConsecutiveFails: 0,
+				LastStart:        time.Now(),
 			}
 			s.mu.Unlock()
 
@@ -102,22 +107,37 @@ func (s *Supervisor) superviseProcess(ctx context.Context, wg *sync.WaitGroup, n
 	for {
 		select {
 		case <-ctx.Done():
-			s.cleanupRoutingPorts()
+			s.CleanRoutingPorts()
 			s.updateStatus(name, "STOPPED", "")
 			return
 		default:
 		}
 
-		// Pastikan port 2007 & 2008 selalu bersih sebelum biner di-spawn
-		s.cleanupRoutingPorts()
+		// Periksa jika gagal 5 kali berturut-turut -> Cooling down 1 menit
+		fails := s.getConsecutiveFails(name)
+		if fails >= 5 {
+			s.logger.Log("SUPERVISOR", fmt.Sprintf("Binary %s failed %d times consecutively. Entering cooldown mode for 60s...", name, fails))
+			s.updateStatus(name, "COOLDOWN_60S", "Crash loop detected, resting for 1 minute")
+			s.CleanRoutingPorts()
 
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(60 * time.Second):
+				s.resetConsecutiveFails(name)
+				s.logger.Log("SUPERVISOR", fmt.Sprintf("Cooldown finished for %s. Resuming execution...", name))
+			}
+		}
+
+		s.CleanRoutingPorts()
 		s.logger.Log("SUPERVISOR", fmt.Sprintf("Launching binary '%s'...", name))
 		s.updateStatus(name, "RUNNING", "")
+
+		startTime := time.Now()
 
 		cmd := exec.CommandContext(ctx, binPath)
 		cmd.Dir = s.workDir
 
-		// Environment injection
 		envMap := os.Environ()
 		envMap = append(envMap,
 			fmt.Sprintf("HOME=%s", s.workDir),
@@ -136,7 +156,7 @@ func (s *Supervisor) superviseProcess(ctx context.Context, wg *sync.WaitGroup, n
 			errMsg := fmt.Sprintf("Failed to spawn %s: %v", name, err)
 			s.logger.Log("CRITICAL", errMsg)
 			s.updateStatus(name, "FAILED", errMsg)
-			s.incrementRestart(name)
+			s.recordFailure(name)
 			time.Sleep(3 * time.Second)
 			continue
 		}
@@ -153,10 +173,17 @@ func (s *Supervisor) superviseProcess(ctx context.Context, wg *sync.WaitGroup, n
 			return
 		}
 
-		errMsg := fmt.Sprintf("Process %s exited (%v). Releasing ports 2007/2008 & auto-restarting in 2s...", name, err)
+		// Jika proses berjalan stabil lebih dari 30 detik sebelum mati, reset hitungan consecutive fails
+		if time.Since(startTime) > 30*time.Second {
+			s.resetConsecutiveFails(name)
+		} else {
+			s.recordFailure(name)
+		}
+
+		errMsg := fmt.Sprintf("Process %s died (%v). Clearing 127.0.0.3 ports...", name, err)
 		s.logger.Log("WARNING", errMsg)
 
-		s.cleanupRoutingPorts()
+		s.CleanRoutingPorts()
 		s.incrementRestart(name)
 		s.updateStatus(name, "CRASHED_RESTARTING", errMsg)
 		time.Sleep(2 * time.Second)
@@ -191,6 +218,31 @@ func (s *Supervisor) incrementRestart(name string) {
 		proc.Restarts++
 		proc.LastStart = time.Now()
 	}
+}
+
+func (s *Supervisor) recordFailure(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if proc, exists := s.processes[name]; exists {
+		proc.ConsecutiveFails++
+	}
+}
+
+func (s *Supervisor) resetConsecutiveFails(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if proc, exists := s.processes[name]; exists {
+		proc.ConsecutiveFails = 0
+	}
+}
+
+func (s *Supervisor) getConsecutiveFails(name string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if proc, exists := s.processes[name]; exists {
+		return proc.ConsecutiveFails
+	}
+	return 0
 }
 
 func (s *Supervisor) GetStatuses() []ProcessInfo {
