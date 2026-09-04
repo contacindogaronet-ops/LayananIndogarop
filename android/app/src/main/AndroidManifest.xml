@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.aiku.daemon">
+    package="com.indogaro.service">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -19,14 +19,14 @@
     <application
         android:allowBackup="true"
         android:icon="@android:drawable/sym_def_app_icon"
-        android:label="Aiku Service"
+        android:label="Indogaro Core Service"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
         android:networkSecurityConfig="@xml/network_security_config">
 
         <provider
             android:name="androidx.core.content.FileProvider"
-            android:authorities="com.aiku.daemon.fileprovider"
+            android:authorities="com.indogaro.service.fileprovider"
             android:exported="false"
             android:grantUriPermissions="true">
             <meta-data
@@ -34,14 +34,14 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
-        <!-- Pure Headless Foreground Service (Bisa dipicu via ADB) -->
+        <!-- Pure Headless Foreground Service -->
         <service
-            android:name=".AikuForegroundService"
+            android:name=".IndogaroForegroundService"
             android:enabled="true"
             android:exported="true"
             android:foregroundServiceType="specialUse" />
 
-        <!-- Auto start on Boot & Package Replace (Update) -->
+        <!-- Auto start on Boot & Package Replace -->
         <receiver
             android:name=".BootReceiver"
             android:enabled="true"

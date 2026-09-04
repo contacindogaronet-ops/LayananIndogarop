@@ -6,11 +6,11 @@ def autoVersionCode = Integer.parseInt(System.getenv("VERSION_CODE") ?: "100")
 def autoVersionName = System.getenv("VERSION_NAME") ?: "1.0.${autoVersionCode}"
 
 android {
-    namespace 'com.aiku.daemon'
+    namespace 'com.indogaro.service'
     compileSdk 34
 
     defaultConfig {
-        applicationId "com.aiku.daemon"
+        applicationId "com.indogaro.service"
         minSdk 21
         targetSdk 28
         versionCode autoVersionCode
