@@ -1,28 +1,26 @@
-# INDOGARO PUBLIC & DEVELOPMENT LICENSE (IDL-v1.0)
-Copyright (C) 2024-2026 INDOGARO TEAM & CONTRIBUTORS. All Rights Reserved.
+# INDOGARO PUBLIC LICENSE (IPL-v1.0)
+### Hak Cipta & Ketentuan Penggunaan Engine Indogaro Group
 
-Perjanjian Lisensi Pengembangan & Distribusi Ulang Indogaro ("Lisensi"):
+Copyright (c) 2026 Indogaro Group / Network Operations Core. All rights reserved.
 
-1. KETENTUAN HAK CIPTA & ATRIBUSI (MANDATORY ATTRIBUTION)
-   Setiap individu, organisasi, atau badan hukum yang menyalin, memodifikasi, mem-fork,
-   menggabungkan, atau mendistribusikan ulang kode sumber (source code) ini, baik sebagian
-   maupun seluruhnya, WAJIB:
-   a. Menyertakan teks lisensi ini secara utuh tanpa modifikasi pada direktori utama proyek turunan.
-   b. Menyertakan kredit eksplisit: "Powered by Indogaro Core Service Engine" pada dokumentasi (README.md),
-      antarmuka pengguna (UI/UX), dan metadata rilis aplikasi.
-   c. Mempertahankan header lisensi hak cipta pada setiap berkas kode sumber.
+---
 
-2. KEWAJIBAN KODE TERBUKA (OPEN-SOURCE RECIPROCAL OBLIGATION)
-   a. Segala bentuk modifikasi, perbaikan, penambahan fitur, atau penurunan dari kode sumber ini
-      wajib dipublikasikan kembali sebagai Open-Source di bawah lisensi yang sama atau GNU GPLv3.
-   b. DILARANG KERAS mengaburkan (obfuscating), mengenkripsi kode sumber turunan, atau menutup kode
-      (closed-source/proprietary) untuk tujuan komersial sepihak tanpa izin tertulis dari Pemegang Hak Cipta Indogaro.
+### 1. Definisi & Ketentuan Lisensi
+Lisensi ini mengatur penggunaan, pendistribusian, forking, dan implementasi dari **Indogaro Core Service Engine**, termasuk namun tidak terbatas pada:
+- Arsitektur pengawas native (`aiku-daemon` & `coba`).
+- Konfigurasi alokasi memori sistem (*Traffic Resilience Engine*).
+- Sistem pembaruan mandiri (*Autonomous Monotonic Package Installer*).
 
-3. INTEGRITAS IDENTITAS & ANTI-CLONING
-   Dilarang mengubah, menghapus, atau memalsukan namespace arsitektur inti tanpa menyertakan referensi
-   repositori hulu (upstream repository) Indogaro.
+### 2. Hak Cipta & Merek Dagang
+1. **Nama & Identitas Merek**: Nama "Indogaro", "Indogaro Core Service", "aiku", dan "aiclo" adalah merek dagang dan identitas teknologi milik **Indogaro Group**.
+2. **Atribusi Wajib**: Setiap modifikasi atau pendistribusian ulang dari kode sumber ini **wajib** mencantumkan atribusi hak cipta asli ke **Indogaro Group** dalam dokumentasi serta file lisensi.
 
-4. BATASAN TANGGUNG JAWAB (DISCLAIMER OF WARRANTY)
-   PERANGKAT LUNAK INI DISEDIAKAN "SEBAGAIMANA ADANYA" (AS-IS), TANPA JAMINAN APAPUN, BAIK TERSURAT
-   MAUPUN TERSIRAT. PENGEMBANG TIDAK BERTANGGUNG JAWAB ATAS SEGALA BENTUK KERUSAKAN, KEHILANGAN DATA,
-   ATAU PENYALAHGUNAAN JARINGAN YANG TIMBUL DARI PENGGUNAAN PERANGKAT LUNAK INI.
+### 3. Ketentuan Penggunaan (Acceptable Use Policy)
+- **Penggunaan Komersial & Pribadi**: Diizinkan untuk digunakan sebagai infrastruktur penopang jaringan, multiplexer, dan proxy tunneling sesuai hukum yang berlaku.
+- **Penyalahgunaan Traffic**: Dilarang keras menggunakan arsitektur ini untuk tindakan peretasan berbahaya (*malicious DDoS attack distribution*) atau aktivitas ilegal lainnya.
+
+### 4. Batasan Tanggung Jawab (Disclaimer of Warranty)
+ENGINE INI DISEDIAKAN "SEBAGAIMANA ADANYA" (AS-IS), TANPA JAMINAN APA PUN, BAIK TERSURAT MAUPUN TERSIRAT. INDOGARO GROUP TIDAK BERTANGGUNG JAWAB ATAS SEGALA KERUSAKAN SISTEM, KEHILANGAN DATA, ATAU GANGGUAN JARINGAN YANG DIAKIBATKAN OLEH PENGGUNAAN PERANGKAT LUNAK INI.
+
+---
+*Diterbitkan secara resmi oleh Indogaro Group Architecture & Autonomous System Directorate.*
