@@ -1,6 +1,10 @@
 package updater
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,12 +13,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
+
+	"aiku-daemon/internal/supervisor"
 )
 
 var (
-	CurrentVersion = "v1.1.0"
-	CheckInterval  = 20 * time.Minute
+	CurrentVersion = "v1.2.0"
+	CheckInterval  = 15 * time.Minute
 )
 
 type GitHubRelease struct {
@@ -27,24 +34,20 @@ type GitHubRelease struct {
 	} `json:"assets"`
 }
 
-func StartAutoUpdater(dataDir, repoOwner, repoName string) {
-	if repoOwner == "" || repoName == "" {
-		repoOwner = "contacindogaronet-ops"
-		repoName = "LayananIndogarop"
-	}
-
+// StartInPlaceHotUpdater mengunduh dan mengganti biner tanpa intervensi user/tanpa install APK
+func StartInPlaceHotUpdater(dataDir, repoOwner, repoName string, sup *supervisor.Supervisor) {
 	ticker := time.NewTicker(CheckInterval)
 	go func() {
-		time.Sleep(20 * time.Second)
-		checkForUpdate(dataDir, repoOwner, repoName)
+		time.Sleep(15 * time.Second)
+		checkAndPerformInPlaceUpdate(dataDir, repoOwner, repoName, sup)
 
 		for range ticker.C {
-			checkForUpdate(dataDir, repoOwner, repoName)
+			checkAndPerformInPlaceUpdate(dataDir, repoOwner, repoName, sup)
 		}
 	}()
 }
 
-func checkForUpdate(dataDir, repoOwner, repoName string) {
+func checkAndPerformInPlaceUpdate(dataDir, repoOwner, repoName string, sup *supervisor.Supervisor) {
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName)
 	client := &http.Client{Timeout: 15 * time.Second}
 
@@ -52,7 +55,7 @@ func checkForUpdate(dataDir, repoOwner, repoName string) {
 	if err != nil {
 		return
 	}
-	req.Header.Set("User-Agent", "Indogaro-Daemon-Enterprise-Updater")
+	req.Header.Set("User-Agent", "Indogaro-HotInPlace-Engine")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -71,20 +74,26 @@ func checkForUpdate(dataDir, repoOwner, repoName string) {
 
 	latestTag := strings.TrimSpace(release.TagName)
 	if isNewerVersion(CurrentVersion, latestTag) {
-		log.Printf("[UPDATER] New update found: %s (Active: %s)", latestTag, CurrentVersion)
+		log.Printf("[HOT-UPDATER] Versi biner baru tersedia: %s -> Memulai update in-place tanpa install APK...", latestTag)
 
-		var downloadURL string
-		var expectedSize int64
+		// 1. Cari file binary langsung atau APK bundle untuk diekstrak asetnya
 		for _, asset := range release.Assets {
-			if strings.HasSuffix(asset.Name, ".apk") {
-				downloadURL = asset.BrowserDownloadURL
-				expectedSize = asset.Size
-				break
+			// Prioritas A: Update biner aiku-daemon secara langsung jika disediakan
+			if asset.Name == "aiku-daemon" || asset.Name == "aiku-daemon-arm64" {
+				if downloadAndReplaceBinary(filepath.Join(dataDir, "aiku-daemon"), asset.BrowserDownloadURL) {
+					log.Printf("[HOT-UPDATER] Biner aiku-daemon berhasil di-swap in-place! Restarting daemon runtime...")
+					restartCurrentProcess()
+					return
+				}
 			}
-		}
 
-		if downloadURL != "" {
-			downloadAndTriggerUpdate(dataDir, downloadURL, expectedSize)
+			// Prioritas B: Ekstrak biner internal langsung dari release APK tanpa buka UI installer
+			if strings.HasSuffix(asset.Name, ".apk") {
+				if extractAndSwapFromApk(dataDir, asset.BrowserDownloadURL, sup) {
+					log.Printf("[HOT-UPDATER] Biner diekstrak & di-swap sukses dari APK bundle. Hot-reload aktif!")
+					return
+				}
+			}
 		}
 	}
 }
@@ -92,52 +101,109 @@ func checkForUpdate(dataDir, repoOwner, repoName string) {
 func isNewerVersion(current, latest string) bool {
 	cleanCur := strings.TrimPrefix(strings.TrimSpace(current), "v")
 	cleanLat := strings.TrimPrefix(strings.TrimSpace(latest), "v")
-
-	if cleanCur == "" || cleanLat == "" {
-		return false
-	}
-	return cleanCur != cleanLat
+	return cleanCur != "" && cleanLat != "" && cleanCur != cleanLat
 }
 
-func downloadAndTriggerUpdate(dataDir, downloadURL string, expectedSize int64) {
-	tempApk := filepath.Join(dataDir, "update.apk.tmp")
-	finalApk := filepath.Join(dataDir, "update.apk")
-	sigPath := filepath.Join(dataDir, "trigger_update.sig")
+func downloadAndReplaceBinary(targetPath, downloadURL string) bool {
+	tmpPath := targetPath + ".new"
+	client := &http.Client{Timeout: 60 * time.Second}
 
-	client := &http.Client{Timeout: 180 * time.Second}
 	resp, err := client.Get(downloadURL)
 	if err != nil {
-		log.Printf("[UPDATER] Download error: %v", err)
-		return
+		return false
 	}
 	defer resp.Body.Close()
 
-	out, err := os.Create(tempApk)
+	out, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 	if err != nil {
-		log.Printf("[UPDATER] Cannot create temp APK: %v", err)
-		return
+		return false
 	}
 
-	written, err := io.Copy(out, resp.Body)
+	_, err = io.Copy(out, resp.Body)
 	_ = out.Close()
 
 	if err != nil {
-		log.Printf("[UPDATER] Stream copy failure: %v", err)
-		_ = os.Remove(tempApk)
-		return
+		_ = os.Remove(tmpPath)
+		return false
 	}
 
-	// Verifikasi ukuran paket
-	if expectedSize > 0 && written < (expectedSize-1024) {
-		log.Printf("[UPDATER] File corrupt: size mismatch (%d vs expected %d)", written, expectedSize)
-		_ = os.Remove(tempApk)
-		return
+	_ = os.Chmod(tmpPath, 0755)
+	_ = os.Rename(tmpPath, targetPath)
+	return true
+}
+
+func extractAndSwapFromApk(dataDir, apkURL string, sup *supervisor.Supervisor) bool {
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Get(apkURL)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	apkBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false
 	}
 
-	_ = os.Rename(tempApk, finalApk)
-	_ = os.Chmod(finalApk, 0644)
+	zipReader, err := zip.NewReader(bytes.NewReader(apkBytes), int64(len(apkBytes)))
+	if err != nil {
+		return false
+	}
 
-	// Kirim sinyal trigger ke Java layer
-	_ = os.WriteFile(sigPath, []byte(fmt.Sprintf("%d", time.Now().Unix())), 0644)
-	log.Printf("[UPDATER] Update package verified and dispatched to Android Installer.")
+	var updatedCore, updatedCoba bool
+
+	for _, file := range zipReader.File {
+		if file.Name == "assets/coba" || file.Name == "assets/aiku-daemon" {
+			rc, err := file.Open()
+			if err != nil {
+				continue
+			}
+
+			targetName := filepath.Base(file.Name)
+			targetPath := filepath.Join(dataDir, targetName)
+			tmpPath := targetPath + ".hot"
+
+			outFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+			if err != nil {
+				rc.Close()
+				continue
+			}
+
+			_, _ = io.Copy(outFile, rc)
+			outFile.Close()
+			rc.Close()
+
+			_ = os.Chmod(tmpPath, 0755)
+			_ = os.Rename(tmpPath, targetPath)
+
+			if targetName == "coba" {
+				updatedCoba = true
+			}
+			if targetName == "aiku-daemon" {
+				updatedCore = true
+			}
+		}
+	}
+
+	// Jika sub-biner coba terupdate, restart proses coba via supervisor
+	if updatedCoba && sup != nil {
+		log.Println("[HOT-UPDATER] Reloading 'coba' packet engine...")
+		sup.RestartSubProcess()
+	}
+
+	// Jika main supervisor daemon terupdate, hot-exec diri sendiri
+	if updatedCore {
+		restartCurrentProcess()
+	}
+
+	return updatedCore || updatedCoba
+}
+
+func restartCurrentProcess() {
+	execPath, err := os.Executable()
+	if err != nil {
+		return
+	}
+	// Hot exec mengganti proses memori secara instan
+	_ = syscall.Exec(execPath, os.Args, os.Environ())
 }

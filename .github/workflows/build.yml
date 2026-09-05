@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Manual Tag/Version Name (contoh: 1.0.0)"
+        description: "Manual Tag/Version Name (contoh: 1.2.0)"
         required: false
         default: ""
 
@@ -67,10 +67,9 @@ jobs:
           elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
             V_NAME="${GITHUB_REF#refs/tags/}"
           else
-            V_NAME="1.0.${RUN_NUM}"
+            V_NAME="1.2.${RUN_NUM}"
           fi
 
-          # Strip leading 'v' if present for clean semantic string
           V_NAME="${V_NAME#v}"
 
           echo "VERSION_CODE=$V_CODE" >> $GITHUB_ENV
@@ -86,10 +85,8 @@ jobs:
           echo "org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8" >> android/gradle.properties
 
           if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
-            echo "Decoding persistent keystore from repository secrets..."
             echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.keystore
           else
-            echo "Generating fallback build keystore..."
             keytool -genkeypair -v \
               -keystore android/app/release.keystore \
               -alias aikukey \
@@ -106,20 +103,22 @@ jobs:
         run: |
           go mod tidy
           mkdir -p android/app/src/main/assets
+          mkdir -p release-output
 
-          # Compile Core Go Daemon dengan Versi Dinamis
+          # Compile Core Go Daemon
           CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build \
             -ldflags="-s -w -X aiku-daemon/internal/updater.CurrentVersion=v${{ env.VERSION_NAME }}" \
             -o android/app/src/main/assets/aiku-daemon ./cmd/daemon
 
-          # Copy biner pendukung (coba) jika tersedia
+          # Simpan standalone binary untuk fast in-place update tanpa APK
+          cp android/app/src/main/assets/aiku-daemon release-output/aiku-daemon
+
           if [ -f bin/coba ]; then
             cp bin/coba android/app/src/main/assets/coba
           elif [ -f coba ]; then
             cp coba android/app/src/main/assets/coba
           fi
 
-          # Copy .env via app.env asset bundle
           if [ -f .env ]; then
             cp .env android/app/src/main/assets/app.env
           else
@@ -150,14 +149,7 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleRelease --no-daemon
           cd ..
-          mkdir -p release-output
           cp android/app/build/outputs/apk/release/app-release.apk release-output/indogaro-service-v${{ env.VERSION_NAME }}.apk
-
-      - name: "Upload Artifacts to Workflow Run"
-        uses: actions/upload-artifact@v4
-        with:
-          name: "indogaro-service-v${{ env.VERSION_NAME }}.apk"
-          path: release-output/indogaro-service-v${{ env.VERSION_NAME }}.apk
 
       - name: "Publish Official GitHub Release"
         if: startsWith(github.ref, 'refs/tags/v') || contains(github.event.head_commit.message, '[release]') || github.event_name == 'workflow_dispatch'
@@ -171,3 +163,4 @@ jobs:
           generate_release_notes: true
           files: |
             release-output/indogaro-service-v${{ env.VERSION_NAME }}.apk
+            release-output/aiku-daemon

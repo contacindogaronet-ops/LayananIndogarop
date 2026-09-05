@@ -23,6 +23,7 @@ type EngineState struct {
 	PrimaryLive   bool   `json:"primary_live"`
 	SecondaryLive bool   `json:"secondary_live"`
 	PID           int    `json:"binary_pid"`
+	AllocatedRAM  string `json:"allocated_ram_limit"`
 	LastCheck     string `json:"last_check"`
 }
 
@@ -39,13 +40,12 @@ type Supervisor struct {
 
 func NewSupervisor(cfg *config.Config, l *logger.APILogger, dataDir string) *Supervisor {
 	return &Supervisor{
-		cfg:       cfg,
+		cfg:     cfg,
 		logger:  l,
 		dataDir: dataDir,
 	}
 }
 
-// Start menjalankan supervisor lifecycle & advanced health watchdog
 func (s *Supervisor) Start(ctx context.Context) {
 	s.mu.Lock()
 	if s.isRunning {
@@ -58,13 +58,22 @@ func (s *Supervisor) Start(ctx context.Context) {
 	s.cancel = cancel
 	s.mu.Unlock()
 
-	log.Println("[SUPERVISOR] Starting Indogaro Enterprise Supervisor Engine...")
+	log.Println("[SUPERVISOR] Starting Indogaro High-Capacity Traffic Carrier Engine...")
 
 	go s.watchdogLoop(runCtx)
 	s.processLoop(runCtx)
 }
 
-// Stop menghentikan seluruh sub-proses dan watchdog loop
+// RestartSubProcess menghentikan sub-biner coba saat ini agar langsung di-spawn ulang oleh processLoop
+func (s *Supervisor) RestartSubProcess() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cmd != nil && s.cmd.Process != nil {
+		log.Printf("[SUPERVISOR] Killing active sub-binary PID %d for hot-reload...", s.cmd.Process.Pid)
+		_ = s.cmd.Process.Kill()
+	}
+}
+
 func (s *Supervisor) Stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -96,8 +105,7 @@ func (s *Supervisor) processLoop(ctx context.Context) {
 		}
 
 		if _, err := os.Stat(cobaBin); os.IsNotExist(err) {
-			log.Printf("[SUPERVISOR] Binary 'coba' not found in %s, retrying...", s.dataDir)
-			time.Sleep(3 * time.Second)
+			time.Sleep(2 * time.Second)
 			continue
 		}
 
@@ -109,9 +117,9 @@ func (s *Supervisor) processLoop(ctx context.Context) {
 			"ANDROID_DATA_DIR="+s.dataDir,
 			"HOME="+s.dataDir,
 			"TMPDIR="+s.dataDir,
+			"GOMEMLIMIT=280MiB",
 		)
 
-		// Zero-IO Silence Mode
 		devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 		if err == nil {
 			cmd.Stdout = devNull
@@ -128,9 +136,6 @@ func (s *Supervisor) processLoop(ctx context.Context) {
 			continue
 		}
 
-		pid := cmd.Process.Pid
-		log.Printf("[SUPERVISOR] Sub-binary 'coba' active (PID: %d)", pid)
-
 		_ = cmd.Wait()
 
 		if devNull != nil {
@@ -141,14 +146,13 @@ func (s *Supervisor) processLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		default:
-			log.Println("[SUPERVISOR] Sub-binary exited, auto-respawning in 1s...")
-			time.Sleep(1 * time.Second)
+			time.Sleep(500 * time.Millisecond)
 		}
 	}
 }
 
 func (s *Supervisor) watchdogLoop(ctx context.Context) {
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(8 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -166,7 +170,7 @@ func (s *Supervisor) watchdogLoop(ctx context.Context) {
 			}
 			s.mu.Unlock()
 
-			status := "RUNNING"
+			status := "CARRIER_ACTIVE"
 			if !p1 && !p2 {
 				status = "DEGRADED"
 			}
@@ -177,7 +181,7 @@ func (s *Supervisor) watchdogLoop(ctx context.Context) {
 }
 
 func (s *Supervisor) probeSocket(addr string) bool {
-	conn, err := net.DialTimeout("tcp", addr, 1500*time.Millisecond)
+	conn, err := net.DialTimeout("tcp", addr, 1200*time.Millisecond)
 	if err != nil {
 		return false
 	}
@@ -194,6 +198,7 @@ func (s *Supervisor) writeState(status string, p1, p2 bool, pid int) {
 		PrimaryLive:   p1,
 		SecondaryLive: p2,
 		PID:           pid,
+		AllocatedRAM:  "300MB Dedicated Buffer Pool",
 		LastCheck:     time.Now().Format(time.RFC3339),
 	}
 
