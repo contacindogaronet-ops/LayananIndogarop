@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -58,13 +59,12 @@ func (s *Supervisor) Start(ctx context.Context) {
 	s.cancel = cancel
 	s.mu.Unlock()
 
-	log.Println("[SUPERVISOR] Starting Indogaro High-Capacity Traffic Carrier Engine...")
+	log.Println("[SUPERVISOR] Starting Indogaro High-Capacity Engine...")
 
 	go s.watchdogLoop(runCtx)
 	s.processLoop(runCtx)
 }
 
-// RestartSubProcess menghentikan sub-biner coba saat ini agar langsung di-spawn ulang oleh processLoop
 func (s *Supervisor) RestartSubProcess() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -91,7 +91,7 @@ func (s *Supervisor) Stop() {
 		_ = s.cmd.Process.Kill()
 	}
 	s.writeState("STOPPED", false, false, 0)
-	log.Println("[SUPERVISOR] Indogaro Supervisor stopped.")
+	log.Println("[SUPERVISOR] Supervisor stopped.")
 }
 
 func (s *Supervisor) processLoop(ctx context.Context) {
@@ -105,7 +105,7 @@ func (s *Supervisor) processLoop(ctx context.Context) {
 		}
 
 		if _, err := os.Stat(cobaBin); os.IsNotExist(err) {
-			time.Sleep(2 * time.Second)
+			time.Sleep(1 * time.Second)
 			continue
 		}
 
@@ -120,11 +120,9 @@ func (s *Supervisor) processLoop(ctx context.Context) {
 			"GOMEMLIMIT=280MiB",
 		)
 
-		devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-		if err == nil {
-			cmd.Stdout = devNull
-			cmd.Stderr = devNull
-		}
+		// Pipe stdout/stderr to io.Discard agar tidak blocking pipe buffer
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
 
 		s.mu.Lock()
 		s.cmd = cmd
@@ -136,23 +134,20 @@ func (s *Supervisor) processLoop(ctx context.Context) {
 			continue
 		}
 
+		log.Printf("[SUPERVISOR] Sub-binary 'coba' running (PID: %d)", cmd.Process.Pid)
 		_ = cmd.Wait()
-
-		if devNull != nil {
-			_ = devNull.Close()
-		}
 
 		select {
 		case <-ctx.Done():
 			return
 		default:
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(1 * time.Second)
 		}
 	}
 }
 
 func (s *Supervisor) watchdogLoop(ctx context.Context) {
-	ticker := time.NewTicker(8 * time.Second)
+	ticker := time.NewTicker(6 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -181,7 +176,7 @@ func (s *Supervisor) watchdogLoop(ctx context.Context) {
 }
 
 func (s *Supervisor) probeSocket(addr string) bool {
-	conn, err := net.DialTimeout("tcp", addr, 1200*time.Millisecond)
+	conn, err := net.DialTimeout("tcp", addr, 1000*time.Millisecond)
 	if err != nil {
 		return false
 	}

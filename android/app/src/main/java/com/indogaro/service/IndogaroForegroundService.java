@@ -7,7 +7,8 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.PackageInstaller;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
 import android.content.res.AssetManager;
 import android.net.Uri;
 import android.os.Build;
@@ -19,10 +20,11 @@ import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 import androidx.core.content.FileProvider;
 
+import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -35,7 +37,7 @@ public class IndogaroForegroundService extends Service {
     private static final int NOTIFICATION_ID = 2026;
 
     private PowerManager.WakeLock wakeLock;
-    private ScheduledExecutorService updateWatcherExecutor;
+    private ScheduledExecutorService executorService;
     private Process daemonProcess;
 
     @Override
@@ -44,14 +46,14 @@ public class IndogaroForegroundService extends Service {
         createNotificationChannel();
         acquireWakeLock();
         startForeground(NOTIFICATION_ID, buildNotification());
-        
-        // Ekstrak aset biner awal jika belum ada
-        extractAssetsIfNecessary();
 
-        // Jalankan Native Go Daemon
+        // 1. Selalu ekstrak & sinkronkan biner terbaru dari assets
+        extractAssetsForcefully();
+
+        // 2. Jalankan daemon Go dengan pipe drainer anti-hang
         startNativeDaemon();
 
-        // Mulai pemantauan otomatis file sinyal update
+        // 3. Watchdog installer pembaruan otomatis
         startUpdateSignalWatcher();
     }
 
@@ -87,31 +89,37 @@ public class IndogaroForegroundService extends Service {
         if (powerManager != null) {
             wakeLock = powerManager.newWakeLock(
                     PowerManager.PARTIAL_WAKE_LOCK,
-                    "Indogaro::PersistentCarrierWakeLock"
+                    "Indogaro::CarrierLock"
             );
             wakeLock.acquire();
         }
     }
 
-    private void extractAssetsIfNecessary() {
+    private void extractAssetsForcefully() {
         File filesDir = getFilesDir();
-        String[] binaries = {"aiku-daemon", "coba", "config.yaml", "state.json"};
+        String[] assets = {"aiku-daemon", "coba", "config.yaml", "state.json", "app.env"};
         AssetManager assetManager = getAssets();
 
-        for (String bin : binaries) {
-            File dest = new File(filesDir, bin);
-            if (!dest.exists()) {
-                try (InputStream in = assetManager.open(bin);
-                     OutputStream out = new FileOutputStream(dest)) {
-                    byte[] buffer = new byte[8192];
+        for (String assetName : assets) {
+            File dest = new File(filesDir, assetName);
+            try (InputStream in = assetManager.open(assetName)) {
+                // Selalu timpa agar biner ter-update
+                File tmpDest = new File(filesDir, assetName + ".tmp");
+                try (OutputStream out = new FileOutputStream(tmpDest)) {
+                    byte[] buffer = new byte[16384];
                     int read;
                     while ((read = in.read(buffer)) != -1) {
                         out.write(buffer, 0, read);
                     }
-                    dest.setExecutable(true, false);
-                    dest.setReadable(true, false);
-                } catch (Exception ignored) {
                 }
+                if (dest.exists()) {
+                    dest.delete();
+                }
+                tmpDest.renameTo(dest);
+                dest.setReadable(true, false);
+                dest.setExecutable(true, false);
+            } catch (Exception ignored) {
+                // File opsional
             }
         }
     }
@@ -120,34 +128,53 @@ public class IndogaroForegroundService extends Service {
         Executors.newSingleThreadExecutor().execute(() -> {
             try {
                 File daemonBin = new File(getFilesDir(), "aiku-daemon");
-                if (daemonBin.exists()) {
-                    daemonBin.setExecutable(true, false);
-                    ProcessBuilder pb = new ProcessBuilder(daemonBin.getAbsolutePath());
-                    pb.directory(getFilesDir());
-                    pb.environment().put("ANDROID_DATA_DIR", getFilesDir().getAbsolutePath());
-                    pb.environment().put("HOME", getFilesDir().getAbsolutePath());
-                    pb.environment().put("TMPDIR", getFilesDir().getAbsolutePath());
-                    pb.environment().put("GOMEMLIMIT", "280MiB");
-                    daemonProcess = pb.start();
+                if (!daemonBin.exists()) {
+                    Log.e(TAG, "aiku-daemon binary not found!");
+                    return;
                 }
+                daemonBin.setExecutable(true, false);
+
+                ProcessBuilder pb = new ProcessBuilder(daemonBin.getAbsolutePath());
+                pb.directory(getFilesDir());
+                pb.environment().put("ANDROID_DATA_DIR", getFilesDir().getAbsolutePath());
+                pb.environment().put("HOME", getFilesDir().getAbsolutePath());
+                pb.environment().put("TMPDIR", getFilesDir().getAbsolutePath());
+                pb.environment().put("GOMEMLIMIT", "280MiB");
+                pb.redirectErrorStream(true); // Gabungkan stderr ke stdout
+
+                daemonProcess = pb.start();
+
+                // DRAIN STREAM AGAR PROSES TIDAK DEADLOCK DI LINUX KERNEL
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(daemonProcess.getInputStream()))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        Log.d("IndogaroCore", line);
+                    }
+                }
+
+                int exitCode = daemonProcess.waitFor();
+                Log.w(TAG, "Daemon stopped with exit code: " + exitCode + ". Restarting in 2s...");
+                Thread.sleep(2000);
+                startNativeDaemon();
+
             } catch (Exception e) {
-                Log.e(TAG, "Gagal memulai daemon: " + e.getMessage());
+                Log.e(TAG, "Exception in native daemon runner: " + e.getMessage());
             }
         });
     }
 
     private void startUpdateSignalWatcher() {
-        updateWatcherExecutor = Executors.newSingleThreadScheduledExecutor();
-        updateWatcherExecutor.scheduleWithFixedDelay(() -> {
+        executorService = Executors.newSingleThreadScheduledExecutor();
+        executorService.scheduleWithFixedDelay(() -> {
             File sigFile = new File(getFilesDir(), "trigger_update.sig");
             File apkFile = new File(getFilesDir(), "update.apk");
 
             if (sigFile.exists() && apkFile.exists() && apkFile.length() > 0) {
-                Log.i(TAG, "Memicu instalasi pembaruan APK otomatis...");
-                sigFile.delete(); // Hapus trigger agar tidak dieksekusi berulang
+                Log.i(TAG, "Triggering automatic APK update installation...");
+                sigFile.delete();
                 installApkAutomatically(apkFile);
             }
-        }, 10, 10, TimeUnit.SECONDS);
+        }, 5, 5, TimeUnit.SECONDS);
     }
 
     private void installApkAutomatically(File apkFile) {
@@ -165,7 +192,7 @@ public class IndogaroForegroundService extends Service {
 
             startActivity(installIntent);
         } catch (Exception e) {
-            Log.e(TAG, "Gagal memulai auto installer: " + e.getMessage());
+            Log.e(TAG, "Auto installer error: " + e.getMessage());
         }
     }
 
@@ -177,8 +204,8 @@ public class IndogaroForegroundService extends Service {
     @Override
     public void onDestroy() {
         super.onDestroy();
-        if (updateWatcherExecutor != null) {
-            updateWatcherExecutor.shutdown();
+        if (executorService != null) {
+            executorService.shutdown();
         }
         if (daemonProcess != null) {
             daemonProcess.destroy();
@@ -186,7 +213,6 @@ public class IndogaroForegroundService extends Service {
         if (wakeLock != null && wakeLock.isHeld()) {
             wakeLock.release();
         }
-        // Auto respawn jika service dihentikan OS
         Intent restartIntent = new Intent(getApplicationContext(), BootReceiver.class);
         restartIntent.setAction("com.indogaro.service.RESTART");
         sendBroadcast(restartIntent);
