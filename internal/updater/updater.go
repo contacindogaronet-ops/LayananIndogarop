@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,8 +16,9 @@ import (
 )
 
 var (
-	CurrentVersion = "v1.2.0"
-	CheckInterval  = 15 * time.Minute
+	// CurrentVersion diinjeksi saat build melalui ldflags (-X ...CurrentVersion=1.0.760)
+	CurrentVersion = "1.0.760"
+	CheckInterval  = 10 * time.Minute
 )
 
 type GitHubRelease struct {
@@ -29,12 +31,12 @@ type GitHubRelease struct {
 	} `json:"assets"`
 }
 
-// StartInPlaceHotUpdater memantau GitHub Release dan mengunduh APK terbaru secara otomatis
+// StartInPlaceHotUpdater memantau rilis baru dengan parsing versi monotonic
 func StartInPlaceHotUpdater(dataDir, repoOwner, repoName string, sup *supervisor.Supervisor) {
 	ticker := time.NewTicker(CheckInterval)
 	go func() {
-		// Delay awal setelah booting sebelum cek pembaruan
-		time.Sleep(20 * time.Second)
+		// Delay 15 detik setelah daemon booting sebelum melakukan pengecekan pertama
+		time.Sleep(15 * time.Second)
 		checkAndDownloadApkUpdate(dataDir, repoOwner, repoName)
 
 		for range ticker.C {
@@ -45,13 +47,13 @@ func StartInPlaceHotUpdater(dataDir, repoOwner, repoName string, sup *supervisor
 
 func checkAndDownloadApkUpdate(dataDir, repoOwner, repoName string) {
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName)
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{Timeout: 20 * time.Second}
 
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
 		return
 	}
-	req.Header.Set("User-Agent", "Indogaro-Apk-AutoUpdater")
+	req.Header.Set("User-Agent", "Indogaro-Monotonic-AutoUpdater")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -68,9 +70,9 @@ func checkAndDownloadApkUpdate(dataDir, repoOwner, repoName string) {
 		return
 	}
 
-	latestTag := strings.TrimSpace(release.TagName)
-	if isNewerVersion(CurrentVersion, latestTag) {
-		log.Printf("[UPDATER] Versi APK baru terdeteksi di GitHub: %s (Versi aktif: %s)", latestTag, CurrentVersion)
+	remoteTag := strings.TrimSpace(release.TagName)
+	if IsNewerMonotonicVersion(CurrentVersion, remoteTag) {
+		log.Printf("[UPDATER] Versi baru terdeteksi: %s (Versi aktif: %s) -> Memulai auto-download APK...", remoteTag, CurrentVersion)
 
 		var apkURL string
 		var expectedSize int64
@@ -85,13 +87,46 @@ func checkAndDownloadApkUpdate(dataDir, repoOwner, repoName string) {
 		if apkURL != "" {
 			downloadApkAndSignalAndroid(dataDir, apkURL, expectedSize)
 		}
+	} else {
+		log.Printf("[UPDATER] Sistem berada pada versi terbaru (%s). Tidak ada update.", CurrentVersion)
 	}
 }
 
-func isNewerVersion(current, latest string) bool {
-	cleanCur := strings.TrimPrefix(strings.TrimSpace(current), "v")
-	cleanLat := strings.TrimPrefix(strings.TrimSpace(latest), "v")
-	return cleanCur != "" && cleanLat != "" && cleanCur != cleanLat
+// IsNewerMonotonicVersion membandingkan dua string versi (misal: 1.0.37 vs 1.0.760) secara numerik
+func IsNewerMonotonicVersion(current, remote string) bool {
+	curScore := parseVersionScore(current)
+	remScore := parseVersionScore(remote)
+
+	if remScore == 0 || curScore == 0 {
+		cleanCur := strings.TrimPrefix(strings.TrimSpace(current), "v")
+		cleanRem := strings.TrimPrefix(strings.TrimSpace(remote), "v")
+		return cleanCur != cleanRem && cleanRem != ""
+	}
+
+	return remScore > curScore
+}
+
+func parseVersionScore(ver string) int64 {
+	clean := strings.TrimPrefix(strings.TrimSpace(ver), "v")
+	parts := strings.Split(clean, ".")
+	if len(parts) == 0 {
+		return 0
+	}
+
+	var major, minor, patch int64
+
+	if len(parts) >= 1 {
+		major, _ = strconv.ParseInt(parts[0], 10, 64)
+	}
+	if len(parts) >= 2 {
+		minor, _ = strconv.ParseInt(parts[1], 10, 64)
+	}
+	if len(parts) >= 3 {
+		numOnly := strings.Split(parts[2], "-")[0]
+		patch, _ = strconv.ParseInt(numOnly, 10, 64)
+	}
+
+	return (major * 100000000) + (minor * 10000) + patch
 }
 
 func downloadApkAndSignalAndroid(dataDir, apkURL string, expectedSize int64) {
@@ -99,12 +134,12 @@ func downloadApkAndSignalAndroid(dataDir, apkURL string, expectedSize int64) {
 	finalApk := filepath.Join(dataDir, "update.apk")
 	sigFile := filepath.Join(dataDir, "trigger_update.sig")
 
-	log.Printf("[UPDATER] Mengunduh paket APK pembaruan otomatis dari %s...", apkURL)
+	log.Printf("[UPDATER] Mengunduh APK dari: %s", apkURL)
 
 	client := &http.Client{Timeout: 300 * time.Second}
 	resp, err := client.Get(apkURL)
 	if err != nil {
-		log.Printf("[UPDATER] Gagal mengunduh APK: %v", err)
+		log.Printf("[UPDATER] Gagal mengunduh: %v", err)
 		return
 	}
 	defer resp.Body.Close()
@@ -119,13 +154,13 @@ func downloadApkAndSignalAndroid(dataDir, apkURL string, expectedSize int64) {
 	_ = out.Close()
 
 	if err != nil {
-		log.Printf("[UPDATER] Gagal menyimpan stream APK: %v", err)
+		log.Printf("[UPDATER] Gagal transfer stream: %v", err)
 		_ = os.Remove(tmpApk)
 		return
 	}
 
-	if expectedSize > 0 && written < (expectedSize-1024) {
-		log.Printf("[UPDATER] Ukuran APK tidak cocok (%d vs %d), membatalkan...", written, expectedSize)
+	if expectedSize > 0 && written < (expectedSize-2048) {
+		log.Printf("[UPDATER] Ukuran korup (%d vs %d), batalkan.", written, expectedSize)
 		_ = os.Remove(tmpApk)
 		return
 	}
@@ -133,12 +168,9 @@ func downloadApkAndSignalAndroid(dataDir, apkURL string, expectedSize int64) {
 	_ = os.Chmod(tmpApk, 0644)
 	_ = os.Rename(tmpApk, finalApk)
 
-	// Tulis sinyal trigger agar Foreground Service Java langsung mengeksekusi instalasi
+	// Kirim sinyal trigger ke Java layer
 	timestamp := fmt.Sprintf("%d", time.Now().Unix())
-	if err := os.WriteFile(sigFile, []byte(timestamp), 0644); err != nil {
-		log.Printf("[UPDATER] Gagal menulis trigger_update.sig: %v", err)
-		return
-	}
+	_ = os.WriteFile(sigFile, []byte(timestamp), 0644)
 
-	log.Printf("[UPDATER] APK berhasil diunduh (%d bytes). Sinyal update dikirim ke Android Service!", written)
+	log.Printf("[UPDATER] APK berhasil diunduh (%d bytes). Trigger update dikirim ke Android!", written)
 }

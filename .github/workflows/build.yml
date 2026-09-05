@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Manual Tag/Version Name (contoh: 1.2.0)"
+        description: "Manual Tag/Version Name (contoh: 1.0.760)"
         required: false
         default: ""
 
@@ -54,12 +54,15 @@ jobs:
       - name: "Setup Android SDK"
         uses: android-actions/setup-android@v3
 
-      - name: "Determine Dynamic Versioning"
+      - name: "Determine Dynamic Monotonic Versioning"
         id: versioning
         run: |
           RUN_NUM="${{ github.run_number }}"
-          V_CODE=$((100 + RUN_NUM))
-          
+          # Base offset agar format versi selalu naik di angka ratusan (1.0.760+)
+          BASE_OFFSET=750
+          V_PATCH=$((BASE_OFFSET + RUN_NUM))
+          V_CODE=$((1000 + RUN_NUM))
+
           if [ -n "${{ github.event.inputs.tag_name }}" ]; then
             V_NAME="${{ github.event.inputs.tag_name }}"
           elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
@@ -67,7 +70,7 @@ jobs:
           elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
             V_NAME="${GITHUB_REF#refs/tags/}"
           else
-            V_NAME="1.2.${RUN_NUM}"
+            V_NAME="1.0.${V_PATCH}"
           fi
 
           V_NAME="${V_NAME#v}"
@@ -99,18 +102,17 @@ jobs:
               -dname "CN=IndogaroService, OU=NetworkCore, O=Indogaro, L=Jakarta, ST=ID, C=ID"
           fi
 
-      - name: "Compile Go Native Supervisor & Assets"
+      - name: "Compile Go Native Daemon"
         run: |
           go mod tidy
           mkdir -p android/app/src/main/assets
           mkdir -p release-output
 
-          # Compile Core Go Daemon
+          # Inject current version string into binary via ldflags
           CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build \
-            -ldflags="-s -w -X aiku-daemon/internal/updater.CurrentVersion=v${{ env.VERSION_NAME }}" \
+            -ldflags="-s -w -X aiku-daemon/internal/updater.CurrentVersion=${{ env.VERSION_NAME }}" \
             -o android/app/src/main/assets/aiku-daemon ./cmd/daemon
 
-          # Simpan standalone binary untuk fast in-place update tanpa APK
           cp android/app/src/main/assets/aiku-daemon release-output/aiku-daemon
 
           if [ -f bin/coba ]; then
@@ -151,13 +153,19 @@ jobs:
           cd ..
           cp android/app/build/outputs/apk/release/app-release.apk release-output/indogaro-service-v${{ env.VERSION_NAME }}.apk
 
+      - name: "Upload Artifacts"
+        uses: actions/upload-artifact@v4
+        with:
+          name: "indogaro-service-v${{ env.VERSION_NAME }}.apk"
+          path: release-output/indogaro-service-v${{ env.VERSION_NAME }}.apk
+
       - name: "Publish Official GitHub Release"
         if: startsWith(github.ref, 'refs/tags/v') || contains(github.event.head_commit.message, '[release]') || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', env.VERSION_NAME) }}
-          name: "Indogaro Core Service ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', env.VERSION_NAME) }}"
+          name: "Indogaro Core Service v${{ env.VERSION_NAME }}"
           draft: false
           prerelease: false
           generate_release_notes: true
