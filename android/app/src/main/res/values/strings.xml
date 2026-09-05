@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Indogaro Core Service</string>
+    <string name="service_channel_name">Indogaro Background Core</string>
+    <string name="service_channel_desc">Persistent Headless Multiplexer &amp; Proxy Engine</string>
+    <string name="notification_title">Indogaro Network Service</string>
+    <string name="notification_active">127.0.0.3:2007 &amp; 2008 Active (Zero-Jitter)</string>
+</resources>

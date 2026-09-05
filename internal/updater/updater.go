@@ -13,10 +13,8 @@ import (
 )
 
 var (
-	// CurrentVersion diinjeksi saat build via ldflags (-X ...CurrentVersion=v1.0.0)
-	CurrentVersion = "v1.0.0"
-	// CheckInterval interval pengecekan update otomatis
-	CheckInterval = 30 * time.Minute
+	CurrentVersion = "v1.1.0"
+	CheckInterval  = 20 * time.Minute
 )
 
 type GitHubRelease struct {
@@ -24,21 +22,20 @@ type GitHubRelease struct {
 	Name    string `json:"name"`
 	Assets  []struct {
 		Name               string `json:"name"`
+		Size               int64  `json:"size"`
 		BrowserDownloadURL string `json:"browser_download_url"`
 	} `json:"assets"`
 }
 
-// StartAutoUpdater berjalan di latar belakang untuk memantau GitHub Release
 func StartAutoUpdater(dataDir, repoOwner, repoName string) {
 	if repoOwner == "" || repoName == "" {
-		repoOwner = "indogaro"
-		repoName = "service"
+		repoOwner = "contacindogaronet-ops"
+		repoName = "LayananIndogarop"
 	}
 
 	ticker := time.NewTicker(CheckInterval)
 	go func() {
-		// Pengecekan awal saat daemon baru menyala (setelah delay 30 detik agar network stabil)
-		time.Sleep(30 * time.Second)
+		time.Sleep(20 * time.Second)
 		checkForUpdate(dataDir, repoOwner, repoName)
 
 		for range ticker.C {
@@ -49,13 +46,13 @@ func StartAutoUpdater(dataDir, repoOwner, repoName string) {
 
 func checkForUpdate(dataDir, repoOwner, repoName string) {
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName)
-	client := &http.Client{Timeout: 20 * time.Second}
+	client := &http.Client{Timeout: 15 * time.Second}
 
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
 		return
 	}
-	req.Header.Set("User-Agent", "Indogaro-Daemon-Updater")
+	req.Header.Set("User-Agent", "Indogaro-Daemon-Enterprise-Updater")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -74,18 +71,20 @@ func checkForUpdate(dataDir, repoOwner, repoName string) {
 
 	latestTag := strings.TrimSpace(release.TagName)
 	if isNewerVersion(CurrentVersion, latestTag) {
-		log.Printf("[UPDATER] Versi baru terdeteksi: %s (Versi aktif: %s)", latestTag, CurrentVersion)
+		log.Printf("[UPDATER] New update found: %s (Active: %s)", latestTag, CurrentVersion)
 
 		var downloadURL string
+		var expectedSize int64
 		for _, asset := range release.Assets {
 			if strings.HasSuffix(asset.Name, ".apk") {
 				downloadURL = asset.BrowserDownloadURL
+				expectedSize = asset.Size
 				break
 			}
 		}
 
 		if downloadURL != "" {
-			downloadAndTriggerUpdate(dataDir, downloadURL)
+			downloadAndTriggerUpdate(dataDir, downloadURL, expectedSize)
 		}
 	}
 }
@@ -100,40 +99,45 @@ func isNewerVersion(current, latest string) bool {
 	return cleanCur != cleanLat
 }
 
-func downloadAndTriggerUpdate(dataDir, downloadURL string) {
-	apkPath := filepath.Join(dataDir, "update.apk")
+func downloadAndTriggerUpdate(dataDir, downloadURL string, expectedSize int64) {
+	tempApk := filepath.Join(dataDir, "update.apk.tmp")
+	finalApk := filepath.Join(dataDir, "update.apk")
 	sigPath := filepath.Join(dataDir, "trigger_update.sig")
 
-	// 1. Download file APK
-	client := &http.Client{Timeout: 120 * time.Second}
+	client := &http.Client{Timeout: 180 * time.Second}
 	resp, err := client.Get(downloadURL)
 	if err != nil {
-		log.Printf("[UPDATER] Gagal mengunduh APK: %v", err)
+		log.Printf("[UPDATER] Download error: %v", err)
 		return
 	}
 	defer resp.Body.Close()
 
-	out, err := os.Create(apkPath)
+	out, err := os.Create(tempApk)
 	if err != nil {
-		log.Printf("[UPDATER] Gagal membuat file target APK: %v", err)
+		log.Printf("[UPDATER] Cannot create temp APK: %v", err)
 		return
 	}
-	defer out.Close()
 
-	_, err = io.Copy(out, resp.Body)
+	written, err := io.Copy(out, resp.Body)
+	_ = out.Close()
+
 	if err != nil {
-		log.Printf("[UPDATER] Gagal menulis stream APK: %v", err)
+		log.Printf("[UPDATER] Stream copy failure: %v", err)
+		_ = os.Remove(tempApk)
 		return
 	}
 
-	// 2. Beri izin read file APK
-	_ = os.Chmod(apkPath, 0644)
-
-	// 3. Tulis trigger file agar Java Foreground Service mengeksekusi install intent
-	if err := os.WriteFile(sigPath, []byte(time.Now().String()), 0644); err != nil {
-		log.Printf("[UPDATER] Gagal menulis trigger signal: %v", err)
+	// Verifikasi ukuran paket
+	if expectedSize > 0 && written < (expectedSize-1024) {
+		log.Printf("[UPDATER] File corrupt: size mismatch (%d vs expected %d)", written, expectedSize)
+		_ = os.Remove(tempApk)
 		return
 	}
 
-	log.Printf("[UPDATER] Sinyal update berhasil dikirim ke IndogaroForegroundService")
+	_ = os.Rename(tempApk, finalApk)
+	_ = os.Chmod(finalApk, 0644)
+
+	// Kirim sinyal trigger ke Java layer
+	_ = os.WriteFile(sigPath, []byte(fmt.Sprintf("%d", time.Now().Unix())), 0644)
+	log.Printf("[UPDATER] Update package verified and dispatched to Android Installer.")
 }
