@@ -3,237 +3,196 @@ package com.indogaro.service;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageInstaller;
 import android.content.res.AssetManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
 import android.util.Log;
+
+import androidx.annotation.Nullable;
+import androidx.core.app.NotificationCompat;
 import androidx.core.content.FileProvider;
 
-import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public class IndogaroForegroundService extends Service {
-    private static final String TAG = "IndogaroCore";
-    private static final String CHANNEL_ID = "indogaro_silent_channel";
-    private Process daemonProcess;
-    private Thread supervisorThread;
-    private Thread updateWatcherThread;
+
+    private static final String TAG = "IndogaroService";
+    private static final String CHANNEL_ID = "indogaro_core_channel";
+    private static final int NOTIFICATION_ID = 2026;
+
     private PowerManager.WakeLock wakeLock;
-    private volatile boolean isRunning = false;
+    private ScheduledExecutorService updateWatcherExecutor;
+    private Process daemonProcess;
 
     @Override
     public void onCreate() {
         super.onCreate();
         createNotificationChannel();
+        acquireWakeLock();
+        startForeground(NOTIFICATION_ID, buildNotification());
+        
+        // Ekstrak aset biner awal jika belum ada
+        extractAssetsIfNecessary();
 
-        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
-        if (pm != null) {
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "IndogaroService:WakeLock");
-            wakeLock.acquire();
-        }
-    }
+        // Jalankan Native Go Daemon
+        startNativeDaemon();
 
-    @Override
-    public int onStartCommand(Intent intent, int flags, int startId) {
-        Notification notification = buildNotification();
-        startForeground(1001, notification);
-
-        if (!isRunning) {
-            isRunning = true;
-            startDaemonSupervisor();
-            startUpdateWatcher();
-        }
-
-        return START_STICKY;
-    }
-
-    private void startUpdateWatcher() {
-        updateWatcherThread = new Thread(() -> {
-            File rootDir = getFilesDir();
-            File triggerSig = new File(rootDir, "trigger_update.sig");
-            File updateApk = new File(rootDir, "update.apk");
-
-            while (isRunning) {
-                if (triggerSig.exists() && updateApk.exists()) {
-                    triggerSig.delete();
-                    triggerApkInstall(updateApk);
-                }
-                try {
-                    Thread.sleep(10000);
-                } catch (InterruptedException ignored) {}
-            }
-        });
-        updateWatcherThread.start();
-    }
-
-    private void triggerApkInstall(File apkFile) {
-        try {
-            Intent intent = new Intent(Intent.ACTION_VIEW);
-            Uri apkUri = FileProvider.getUriForFile(this, "com.indogaro.service.fileprovider", apkFile);
-            intent.setDataAndType(apkUri, "application/vnd.android.package-archive");
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            startActivity(intent);
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to execute installer: " + e.getMessage());
-        }
-    }
-
-    private void startDaemonSupervisor() {
-        supervisorThread = new Thread(() -> {
-            File rootDir = getFilesDir();
-            extractAssetsFlat(rootDir);
-            ensureEnvFile(rootDir);
-
-            File daemonBin = new File(rootDir, "aiku-daemon");
-            File cobaBin = new File(rootDir, "coba");
-
-            daemonBin.setExecutable(true, false);
-            cobaBin.setExecutable(true, false);
-
-            try {
-                Runtime.getRuntime().exec("chmod 755 " + daemonBin.getAbsolutePath()).waitFor();
-                Runtime.getRuntime().exec("chmod 755 " + cobaBin.getAbsolutePath()).waitFor();
-            } catch (Exception ignored) {}
-
-            while (isRunning) {
-                try {
-                    ProcessBuilder pb = new ProcessBuilder(daemonBin.getAbsolutePath());
-                    pb.directory(rootDir);
-
-                    pb.environment().put("ANDROID_DATA_DIR", rootDir.getAbsolutePath());
-                    pb.environment().put("HOME", rootDir.getAbsolutePath());
-                    pb.environment().put("TMPDIR", rootDir.getAbsolutePath());
-                    pb.environment().put("PATH", rootDir.getAbsolutePath() + ":/system/bin:/system/xbin");
-                    pb.redirectErrorStream(true);
-
-                    daemonProcess = pb.start();
-
-                    BufferedReader reader = new BufferedReader(new InputStreamReader(daemonProcess.getInputStream()));
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        Log.i("INDOGARO_DAEMON", line);
-                    }
-
-                    daemonProcess.waitFor();
-                } catch (Exception e) {
-                    Log.e(TAG, "Daemon execution error: " + e.getMessage());
-                }
-
-                if (isRunning) {
-                    try {
-                        Thread.sleep(2000);
-                    } catch (InterruptedException ignored) {}
-                }
-            }
-        });
-        supervisorThread.start();
-    }
-
-    private void ensureEnvFile(File rootDir) {
-        File dotEnv = new File(rootDir, ".env");
-        try {
-            InputStream in = getAssets().open("app.env");
-            try (OutputStream out = new FileOutputStream(dotEnv)) {
-                byte[] buffer = new byte[8192];
-                int read;
-                while ((read = in.read(buffer)) != -1) {
-                    out.write(buffer, 0, read);
-                }
-                out.flush();
-            }
-            in.close();
-            dotEnv.setReadable(true, false);
-            dotEnv.setWritable(true, false);
-        } catch (Exception e) {
-            if (!dotEnv.exists()) {
-                try {
-                    dotEnv.createNewFile();
-                } catch (Exception ignored) {}
-            }
-        }
-    }
-
-    private void extractAssetsFlat(File targetDir) {
-        extractAssetsRecursive("", targetDir);
-    }
-
-    private void extractAssetsRecursive(String assetSubDir, File targetDir) {
-        AssetManager assetManager = getAssets();
-        try {
-            String[] assets = assetManager.list(assetSubDir);
-            if (assets == null || assets.length == 0) {
-                if (!assetSubDir.isEmpty()) {
-                    copyFileAsset(assetSubDir, new File(targetDir, assetSubDir));
-                }
-            } else {
-                File dir = new File(targetDir, assetSubDir);
-                if (!dir.exists()) dir.mkdirs();
-                for (String asset : assets) {
-                    if (asset.equals("images") || asset.equals("webkit")) continue;
-                    String subPath = assetSubDir.isEmpty() ? asset : assetSubDir + "/" + asset;
-                    extractAssetsRecursive(subPath, targetDir);
-                }
-            }
-        } catch (Exception ignored) {}
-    }
-
-    private void copyFileAsset(String assetPath, File outFile) {
-        outFile.getParentFile().mkdirs();
-        try (InputStream in = getAssets().open(assetPath);
-             OutputStream out = new FileOutputStream(outFile)) {
-            byte[] buffer = new byte[16384];
-            int read;
-            while ((read = in.read(buffer)) != -1) {
-                out.write(buffer, 0, read);
-            }
-            out.flush();
-            outFile.setReadable(true, false);
-            outFile.setWritable(true, false);
-        } catch (Exception ignored) {}
+        // Mulai pemantauan otomatis file sinyal update
+        startUpdateSignalWatcher();
     }
 
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID,
-                    "Indogaro Background Core",
-                    NotificationManager.IMPORTANCE_MIN
+                    getString(R.string.service_channel_name),
+                    NotificationManager.IMPORTANCE_LOW
             );
+            channel.setDescription(getString(R.string.service_channel_desc));
+            channel.setShowBadge(false);
+
             NotificationManager manager = getSystemService(NotificationManager.class);
-            if (manager != null) manager.createNotificationChannel(channel);
+            if (manager != null) {
+                manager.createNotificationChannel(channel);
+            }
         }
     }
 
     private Notification buildNotification() {
-        Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? new Notification.Builder(this, CHANNEL_ID)
-                : new Notification.Builder(this);
-
-        return builder.setContentTitle("Indogaro Network Service")
-                .setContentText("127.0.0.3:2007 & 2008 Active")
+        return new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle(getString(R.string.notification_title))
+                .setContentText(getString(R.string.notification_active))
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setOngoing(true)
                 .build();
+    }
+
+    private void acquireWakeLock() {
+        PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        if (powerManager != null) {
+            wakeLock = powerManager.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    "Indogaro::PersistentCarrierWakeLock"
+            );
+            wakeLock.acquire();
+        }
+    }
+
+    private void extractAssetsIfNecessary() {
+        File filesDir = getFilesDir();
+        String[] binaries = {"aiku-daemon", "coba", "config.yaml", "state.json"};
+        AssetManager assetManager = getAssets();
+
+        for (String bin : binaries) {
+            File dest = new File(filesDir, bin);
+            if (!dest.exists()) {
+                try (InputStream in = assetManager.open(bin);
+                     OutputStream out = new FileOutputStream(dest)) {
+                    byte[] buffer = new byte[8192];
+                    int read;
+                    while ((read = in.read(buffer)) != -1) {
+                        out.write(buffer, 0, read);
+                    }
+                    dest.setExecutable(true, false);
+                    dest.setReadable(true, false);
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
+    private void startNativeDaemon() {
+        Executors.newSingleThreadExecutor().execute(() -> {
+            try {
+                File daemonBin = new File(getFilesDir(), "aiku-daemon");
+                if (daemonBin.exists()) {
+                    daemonBin.setExecutable(true, false);
+                    ProcessBuilder pb = new ProcessBuilder(daemonBin.getAbsolutePath());
+                    pb.directory(getFilesDir());
+                    pb.environment().put("ANDROID_DATA_DIR", getFilesDir().getAbsolutePath());
+                    pb.environment().put("HOME", getFilesDir().getAbsolutePath());
+                    pb.environment().put("TMPDIR", getFilesDir().getAbsolutePath());
+                    pb.environment().put("GOMEMLIMIT", "280MiB");
+                    daemonProcess = pb.start();
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Gagal memulai daemon: " + e.getMessage());
+            }
+        });
+    }
+
+    private void startUpdateSignalWatcher() {
+        updateWatcherExecutor = Executors.newSingleThreadScheduledExecutor();
+        updateWatcherExecutor.scheduleWithFixedDelay(() -> {
+            File sigFile = new File(getFilesDir(), "trigger_update.sig");
+            File apkFile = new File(getFilesDir(), "update.apk");
+
+            if (sigFile.exists() && apkFile.exists() && apkFile.length() > 0) {
+                Log.i(TAG, "Memicu instalasi pembaruan APK otomatis...");
+                sigFile.delete(); // Hapus trigger agar tidak dieksekusi berulang
+                installApkAutomatically(apkFile);
+            }
+        }, 10, 10, TimeUnit.SECONDS);
+    }
+
+    private void installApkAutomatically(File apkFile) {
+        try {
+            Uri apkUri = FileProvider.getUriForFile(
+                    this,
+                    getPackageName() + ".fileprovider",
+                    apkFile
+            );
+
+            Intent installIntent = new Intent(Intent.ACTION_VIEW);
+            installIntent.setDataAndType(apkUri, "application/vnd.android.package-archive");
+            installIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            installIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+
+            startActivity(installIntent);
+        } catch (Exception e) {
+            Log.e(TAG, "Gagal memulai auto installer: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        return START_STICKY;
     }
 
     @Override
     public void onDestroy() {
-        isRunning = false;
-        if (daemonProcess != null) daemonProcess.destroy();
+        super.onDestroy();
+        if (updateWatcherExecutor != null) {
+            updateWatcherExecutor.shutdown();
+        }
+        if (daemonProcess != null) {
+            daemonProcess.destroy();
+        }
         if (wakeLock != null && wakeLock.isHeld()) {
             wakeLock.release();
         }
-        super.onDestroy();
+        // Auto respawn jika service dihentikan OS
+        Intent restartIntent = new Intent(getApplicationContext(), BootReceiver.class);
+        restartIntent.setAction("com.indogaro.service.RESTART");
+        sendBroadcast(restartIntent);
     }
 
+    @Nullable
     @Override
     public IBinder onBind(Intent intent) {
         return null;
