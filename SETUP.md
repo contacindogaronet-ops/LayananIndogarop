@@ -10,18 +10,20 @@ Panduan teknis langkah demi langkah instalasi, bypass battery whitelist, inisial
 3. [Langkah 2: Konfigurasi Izin & Bypass Baterai (Android 15 / HyperOS)](#-langkah-2-konfigurasi-izin--bypass-baterai-android-15--hyperos)
 4. [Langkah 3: Menyalakan Service (One-Click Start)](#-langkah-3-menyalakan-service-one-click-start)
 5. [Langkah 4: Verifikasi & Diagnostik Koneksi](#-langkah-4-verifikasi--diagnostik-koneksi)
-6. [Langkah 5: Live Log Streaming](#-langkah-5-live-log-streaming)
-7. [Perintah Darurat & Pemulihan](#-perintah-darurat--pemulihan)
+6. [Langkah 5: Integrasi Client (v2rayNG / Clash / HTTP Custom)](#-langkah-5-integrasi-client-v2rayng--clash--http-custom)
+7. [Langkah 6: Live Log Streaming](#-langkah-6-live-log-streaming)
+8. [Perintah Darurat & Pemulihan](#-perintah-darurat--pemulihan)
 
 ---
 
 ## 📌 Pra-Syarat Lingkungan
 - Smartphone Android (Target: Android 9 hingga Android 15 / Xiaomi HyperOS / Samsung OneUI / ColorOS).
 - Mode **Opsi Pengembang (Developer Options)** dan **Debugging USB (USB Debugging)** telah aktif di HP.
-- Program `adb` telah terpasang di PC/Laptop.
+- Program `adb` telah terpasang di PC/Laptop atau menggunakan Termux (jika perangkat telah di-root).
 
 ---
 
 ## 📥 Langkah 1: Instalasi File APK
 
-Pasang file APK langsung ke HP via terminal:
+### Opsi A: Install via ADB (Direkomendasikan)
+Hubungkan ponsel ke PC/laptop via kabel USB, lalu jalankan perintah berikut:
