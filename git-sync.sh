@@ -1,30 +1,44 @@
 #!/usr/bin/env bash
 set -e
 
-echo "==> [AICLO] Menyiapkan sinkronisasi Git Repository..."
+echo "==> [AICLO] Memulai pipeline Git Autonomous Engine..."
 
-# Pastikan berada di direktori root project
+# Pindah ke direktori root repository
 cd "$(dirname "$0")"
 
-# Stage seluruh file yang diubah dan file baru
+# 1. Pastikan safe directory untuk Termux / Android environment
+git config --global --add safe.directory "$PWD" 2>/dev/null || true
+
+# 2. Stage seluruh file (termasuk file baru, modifikasi, dan untracked)
+echo "==> [AICLO] Menjalankan: git add -A"
 git add -A
 
-# Periksa status working tree
-if git diff-index --quiet HEAD --; then
-    echo "==> [AICLO] Tidak ada perubahan baru untuk di-commit."
+# 3. Cek perubahan di working tree & staging area
+if git diff-index --quiet HEAD -- 2>/dev/null; then
+    echo "==> [AICLO] Tidak ada perubahan baru pada working tree untuk di-commit."
 else
-    COMMIT_MSG="feat(core): update license, setup docs, interactive notification OTA and QS tile extension"
+    COMMIT_MSG="feat(core): update license, setup docs, interactive OTA notification, and QS tile service"
     echo "==> [AICLO] Melakukan commit: ${COMMIT_MSG}"
     git commit -m "${COMMIT_MSG}"
 fi
 
-# Dapatkan nama branch aktif saat ini
-CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-if [ -z "$CURRENT_BRANCH" ]; then
+# 4. Deteksi branch aktif saat ini
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+if [ "$CURRENT_BRANCH" = "HEAD" ] || [ -z "$CURRENT_BRANCH" ]; then
     CURRENT_BRANCH="main"
 fi
 
-echo "==> [AICLO] Melakukan push ke origin/${CURRENT_BRANCH}..."
-git push origin "$CURRENT_BRANCH"
+# 5. Deteksi remote yang terkonfigurasi (default: origin)
+REMOTE_NAME=$(git remote | head -n 1)
+if [ -z "$REMOTE_NAME" ]; then
+    echo "==> [AICLO ERROR] Tidak ditemukan git remote repository!"
+    exit 1
+fi
 
-echo "==> [AICLO] Sinkronisasi Git selesai dengan sukses!"
+echo "==> [AICLO] Branch aktif: ${CURRENT_BRANCH} | Remote: ${REMOTE_NAME}"
+
+# 6. Fetch & Push ke Remote Repository
+echo "==> [AICLO] Mendorong commit ke ${REMOTE_NAME}/${CURRENT_BRANCH}..."
+git push -u "$REMOTE_NAME" "$CURRENT_BRANCH"
+
+echo "==> [AICLO SUCCESS] Semua perubahan telah berhasil di-push ke remote repository!"
