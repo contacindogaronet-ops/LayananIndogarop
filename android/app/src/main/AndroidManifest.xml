@@ -2,31 +2,67 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.indogaro.service">
 
-    <!-- Network & Internet Full Permissions -->
+    <!-- Permission Dasar & Ketahanan Sistem -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
-
-    <!-- Anti-Kill & Persistent WakeLock -->
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
+        android:allowBackup="false"
+        android:icon="@android:drawable/ic_dialog_info"
         android:label="@string/app_name"
         android:largeHeap="true"
-        android:hardwareAccelerated="false"
-        android:persistent="true"
-        android:extractNativeLibs="true"
-        android:usesCleartextTraffic="true"
-        android:supportsRtl="false">
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:supportsRtl="true">
 
-        <!-- FileProvider untuk Auto-Installer APK -->
+        <!-- Persistent Core Foreground Service -->
+        <service
+            android:name=".IndogaroForegroundService"
+            android:enabled="true"
+            android:exported="true"
+            android:foregroundServiceType="specialUse" />
+
+        <!-- Quick Settings Tile Service (Muncul di Edit Panel QS Android) -->
+        <service
+            android:name=".IndogaroTileService"
+            android:label="@string/tile_label"
+            android:icon="@android:drawable/stat_notify_sync"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <!-- Receiver Auto-Boot & Package Reload -->
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="com.indogaro.service.RESTART" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Broadcast Receiver Notifikasi Update Interaktif -->
+        <receiver
+            android:name=".UpdateReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.indogaro.service.ACTION_INSTALL_UPDATE" />
+            </intent-filter>
+        </receiver>
+
+        <!-- FileProvider Subsystem untuk Autonomous In-Place OTA Installer -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -37,28 +73,6 @@
                 android:resource="@xml/provider_paths" />
         </provider>
 
-        <!-- Low Overhead Silent Foreground Service -->
-        <service
-            android:name=".IndogaroForegroundService"
-            android:enabled="true"
-            android:exported="true"
-            android:foregroundServiceType="specialUse"
-            android:stopWithTask="false" />
-
-        <!-- Auto Respawn Receivers -->
-        <receiver
-            android:name=".BootReceiver"
-            android:enabled="true"
-            android:exported="true"
-            android:directBootAware="true">
-            <intent-filter android:priority="1000">
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-                <action android:name="android.intent.action.REBOOT" />
-                <action android:name="com.indogaro.service.RESTART" />
-            </intent-filter>
-        </receiver>
-
     </application>
+
 </manifest>
