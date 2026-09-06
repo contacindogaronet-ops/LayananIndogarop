@@ -7,192 +7,179 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.PackageInfo;
-import android.content.pm.PackageManager;
-import android.content.res.AssetManager;
 import android.net.Uri;
 import android.os.Build;
+import android.os.FileObserver;
 import android.os.IBinder;
 import android.os.PowerManager;
 import android.util.Log;
-
-import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 import androidx.core.content.FileProvider;
-
-import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 
 public class IndogaroForegroundService extends Service {
-
     private static final String TAG = "IndogaroService";
-    private static final String CHANNEL_ID = "indogaro_core_channel";
-    private static final int NOTIFICATION_ID = 2026;
+    private static final String CHANNEL_ID = "indogaro_service_channel";
+    private static final String UPDATE_CHANNEL_ID = "indogaro_update_channel";
+    private static final int NOTIFICATION_ID = 1001;
+    public static final int UPDATE_NOTIF_ID = 1002;
 
     private PowerManager.WakeLock wakeLock;
-    private ScheduledExecutorService executorService;
-    private Process daemonProcess;
+    private Process nativeProcess;
+    private FileObserver updateObserver;
 
     @Override
     public void onCreate() {
         super.onCreate();
-        createNotificationChannel();
+        createNotificationChannels();
         acquireWakeLock();
-        startForeground(NOTIFICATION_ID, buildNotification());
-
-        // 1. Selalu ekstrak & sinkronkan biner terbaru dari assets
-        extractAssetsForcefully();
-
-        // 2. Jalankan daemon Go dengan pipe drainer anti-hang
-        startNativeDaemon();
-
-        // 3. Watchdog installer pembaruan otomatis
-        startUpdateSignalWatcher();
+        startForeground(NOTIFICATION_ID, buildForegroundNotification("Memulai Indogaro Core Service..."));
+        
+        setupUpdateObserver();
+        launchNativeDaemon();
     }
 
-    private void createNotificationChannel() {
+    private void createNotificationChannels() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel(
+            NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (manager == null) return;
+
+            // Channel status service
+            NotificationChannel serviceChannel = new NotificationChannel(
                     CHANNEL_ID,
-                    getString(R.string.service_channel_name),
+                    "Indogaro Service Runtime",
                     NotificationManager.IMPORTANCE_LOW
             );
-            channel.setDescription(getString(R.string.service_channel_desc));
-            channel.setShowBadge(false);
+            serviceChannel.setDescription("Menjaga koneksi proxy dan supervisor carrier aktif di background.");
+            manager.createNotificationChannel(serviceChannel);
 
-            NotificationManager manager = getSystemService(NotificationManager.class);
-            if (manager != null) {
-                manager.createNotificationChannel(channel);
-            }
+            // Channel notifikasi update interaktif
+            NotificationChannel updateChannel = new NotificationChannel(
+                    UPDATE_CHANNEL_ID,
+                    "Indogaro System Updates",
+                    NotificationManager.IMPORTANCE_HIGH
+            );
+            updateChannel.setDescription("Notifikasi ketersediaan update biner dan paket Indogaro Core.");
+            manager.createNotificationChannel(updateChannel);
         }
     }
 
-    private Notification buildNotification() {
+    private void acquireWakeLock() {
+        PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        if (powerManager != null) {
+            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Indogaro::ServiceWakeLock");
+            wakeLock.acquire();
+        }
+    }
+
+    private Notification buildForegroundNotification(String contentText) {
         return new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle(getString(R.string.notification_title))
-                .setContentText(getString(R.string.notification_active))
+                .setContentTitle("Indogaro Core Service")
+                .setContentText(contentText)
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .setOngoing(true)
                 .build();
     }
 
-    private void acquireWakeLock() {
-        PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
-        if (powerManager != null) {
-            wakeLock = powerManager.newWakeLock(
-                    PowerManager.PARTIAL_WAKE_LOCK,
-                    "Indogaro::CarrierLock"
-            );
-            wakeLock.acquire();
+    public void showUpdateAvailableNotification(String apkPath, String versionName) {
+        File apkFile = new File(apkPath);
+        if (!apkFile.exists()) return;
+
+        Intent updateIntent = new Intent(this, UpdateReceiver.class);
+        updateIntent.setAction(UpdateReceiver.ACTION_INSTALL_UPDATE);
+        updateIntent.putExtra(UpdateReceiver.EXTRA_APK_PATH, apkPath);
+
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            flags |= PendingIntent.FLAG_IMMUTABLE;
+        }
+        PendingIntent pendingIntent = PendingIntent.getBroadcast(this, 0, updateIntent, flags);
+
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, UPDATE_CHANNEL_ID)
+                .setContentTitle("⚡ Pembaruan Tersedia " + (versionName != null ? versionName : ""))
+                .setContentText("Versi baru siap diinstal. Sentuh atau klik update sekarang.")
+                .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+                .addAction(android.R.drawable.ic_menu_upload, "UPDATE SEKARANG", pendingIntent);
+
+        NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager != null) {
+            manager.notify(UPDATE_NOTIF_ID, builder.build());
         }
     }
 
-    private void extractAssetsForcefully() {
-        File filesDir = getFilesDir();
-        String[] assets = {"aiku-daemon", "coba", "config.yaml", "state.json", "app.env"};
-        AssetManager assetManager = getAssets();
+    private void setupUpdateObserver() {
+        File updateDir = new File(getFilesDir(), "updates");
+        if (!updateDir.exists()) {
+            updateDir.mkdirs();
+        }
 
-        for (String assetName : assets) {
-            File dest = new File(filesDir, assetName);
-            try (InputStream in = assetManager.open(assetName)) {
-                // Selalu timpa agar biner ter-update
-                File tmpDest = new File(filesDir, assetName + ".tmp");
-                try (OutputStream out = new FileOutputStream(tmpDest)) {
-                    byte[] buffer = new byte[16384];
-                    int read;
-                    while ((read = in.read(buffer)) != -1) {
-                        out.write(buffer, 0, read);
-                    }
+        updateObserver = new FileObserver(updateDir.getAbsolutePath(), FileObserver.CLOSE_WRITE | FileObserver.MOVED_TO) {
+            @Override
+            public void onEvent(int event, String path) {
+                if (path != null && path.endsWith(".apk")) {
+                    File newApk = new File(updateDir, path);
+                    Log.i(TAG, "File APK update terdeteksi selesai diunduh: " + newApk.getAbsolutePath());
+                    showUpdateAvailableNotification(newApk.getAbsolutePath(), path.replace(".apk", ""));
                 }
-                if (dest.exists()) {
-                    dest.delete();
-                }
-                tmpDest.renameTo(dest);
-                dest.setReadable(true, false);
-                dest.setExecutable(true, false);
-            } catch (Exception ignored) {
-                // File opsional
             }
-        }
+        };
+        updateObserver.startWatching();
     }
 
-    private void startNativeDaemon() {
-        Executors.newSingleThreadExecutor().execute(() -> {
+    private void launchNativeDaemon() {
+        new Thread(() -> {
             try {
-                File daemonBin = new File(getFilesDir(), "aiku-daemon");
-                if (!daemonBin.exists()) {
-                    Log.e(TAG, "aiku-daemon binary not found!");
-                    return;
-                }
-                daemonBin.setExecutable(true, false);
+                File binDir = new File(getFilesDir(), "bin");
+                if (!binDir.exists()) binDir.mkdirs();
 
-                ProcessBuilder pb = new ProcessBuilder(daemonBin.getAbsolutePath());
+                File binary = new File(binDir, "coba");
+                if (!binary.exists() || binary.length() == 0) {
+                    extractAssetBinary("coba", binary);
+                }
+                binary.setExecutable(true, false);
+
+                ProcessBuilder pb = new ProcessBuilder(binary.getAbsolutePath());
                 pb.directory(getFilesDir());
-                pb.environment().put("ANDROID_DATA_DIR", getFilesDir().getAbsolutePath());
-                pb.environment().put("HOME", getFilesDir().getAbsolutePath());
-                pb.environment().put("TMPDIR", getFilesDir().getAbsolutePath());
                 pb.environment().put("GOMEMLIMIT", "280MiB");
-                pb.redirectErrorStream(true); // Gabungkan stderr ke stdout
+                pb.environment().put("HOME", getFilesDir().getAbsolutePath());
+                
+                // Zero I/O silence
+                File devNull = new File("/dev/null");
+                pb.redirectOutput(ProcessBuilder.Redirect.to(devNull));
+                pb.redirectError(ProcessBuilder.Redirect.to(devNull));
 
-                daemonProcess = pb.start();
+                nativeProcess = pb.start();
+                Log.i(TAG, "Native core engine berhasil dieksekusi.");
 
-                // DRAIN STREAM AGAR PROSES TIDAK DEADLOCK DI LINUX KERNEL
-                try (BufferedReader reader = new BufferedReader(new InputStreamReader(daemonProcess.getInputStream()))) {
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        Log.d("IndogaroCore", line);
-                    }
+                NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                if (manager != null) {
+                    manager.notify(NOTIFICATION_ID, buildForegroundNotification("Carrier Aktif: 127.0.0.3:2007/2008"));
                 }
 
-                int exitCode = daemonProcess.waitFor();
-                Log.w(TAG, "Daemon stopped with exit code: " + exitCode + ". Restarting in 2s...");
-                Thread.sleep(2000);
-                startNativeDaemon();
-
+                nativeProcess.waitFor();
             } catch (Exception e) {
-                Log.e(TAG, "Exception in native daemon runner: " + e.getMessage());
+                Log.e(TAG, "Error saat menjalankan native daemon: " + e.getMessage(), e);
             }
-        });
+        }).start();
     }
 
-    private void startUpdateSignalWatcher() {
-        executorService = Executors.newSingleThreadScheduledExecutor();
-        executorService.scheduleWithFixedDelay(() -> {
-            File sigFile = new File(getFilesDir(), "trigger_update.sig");
-            File apkFile = new File(getFilesDir(), "update.apk");
-
-            if (sigFile.exists() && apkFile.exists() && apkFile.length() > 0) {
-                Log.i(TAG, "Triggering automatic APK update installation...");
-                sigFile.delete();
-                installApkAutomatically(apkFile);
+    private void extractAssetBinary(String assetName, File destination) {
+        try (InputStream in = getAssets().open(assetName);
+             FileOutputStream out = new FileOutputStream(destination)) {
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                out.write(buffer, 0, read);
             }
-        }, 5, 5, TimeUnit.SECONDS);
-    }
-
-    private void installApkAutomatically(File apkFile) {
-        try {
-            Uri apkUri = FileProvider.getUriForFile(
-                    this,
-                    getPackageName() + ".fileprovider",
-                    apkFile
-            );
-
-            Intent installIntent = new Intent(Intent.ACTION_VIEW);
-            installIntent.setDataAndType(apkUri, "application/vnd.android.package-archive");
-            installIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            installIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-
-            startActivity(installIntent);
+            out.flush();
         } catch (Exception e) {
-            Log.e(TAG, "Auto installer error: " + e.getMessage());
+            Log.e(TAG, "Gagal mengekstrak binary asset: " + e.getMessage(), e);
         }
     }
 
@@ -204,21 +191,17 @@ public class IndogaroForegroundService extends Service {
     @Override
     public void onDestroy() {
         super.onDestroy();
-        if (executorService != null) {
-            executorService.shutdown();
+        if (updateObserver != null) {
+            updateObserver.stopWatching();
         }
-        if (daemonProcess != null) {
-            daemonProcess.destroy();
+        if (nativeProcess != null) {
+            nativeProcess.destroy();
         }
         if (wakeLock != null && wakeLock.isHeld()) {
             wakeLock.release();
         }
-        Intent restartIntent = new Intent(getApplicationContext(), BootReceiver.class);
-        restartIntent.setAction("com.indogaro.service.RESTART");
-        sendBroadcast(restartIntent);
     }
 
-    @Nullable
     @Override
     public IBinder onBind(Intent intent) {
         return null;
