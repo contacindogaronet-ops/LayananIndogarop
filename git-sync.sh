@@ -1,23 +1,30 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -e
 
-echo "[+] Syncing repository state..."
+echo "==> [AICLO] Menyiapkan sinkronisasi Git Repository..."
 
-# Stash any local uncommitted changes safely if needed
-git add README.md SETUP.md LICENSE INDOGARO-LICENSE.md ekttension/ || true
+# Pastikan berada di direktori root project
+cd "$(dirname "$0")"
 
-# Commit documentation and extension updates
-git commit -m "docs & feat: finalize full documentation, licenses, and companion ecosystem in ekttension [release]" || echo "[i] No new changes to commit."
+# Stage seluruh file yang diubah dan file baru
+git add -A
 
-# Fetch remote and rebase cleanly
-echo "[+] Fetching remote tracking branch..."
-git fetch origin main || git fetch origin HEAD
+# Periksa status working tree
+if git diff-index --quiet HEAD --; then
+    echo "==> [AICLO] Tidak ada perubahan baru untuk di-commit."
+else
+    COMMIT_MSG="feat(core): update license, setup docs, interactive notification OTA and QS tile extension"
+    echo "==> [AICLO] Melakukan commit: ${COMMIT_MSG}"
+    git commit -m "${COMMIT_MSG}"
+fi
 
-echo "[+] Rebasing on top of remote..."
-git rebase origin/main || git rebase origin/HEAD
+# Dapatkan nama branch aktif saat ini
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [ -z "$CURRENT_BRANCH" ]; then
+    CURRENT_BRANCH="main"
+fi
 
-# Push resolved history
-echo "[+] Pushing synchronized state..."
-git push origin HEAD
+echo "==> [AICLO] Melakukan push ke origin/${CURRENT_BRANCH}..."
+git push origin "$CURRENT_BRANCH"
 
-echo "[✓] Git synchronization and rebase completed successfully."
+echo "==> [AICLO] Sinkronisasi Git selesai dengan sukses!"
