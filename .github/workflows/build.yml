@@ -1,174 +1,72 @@
-name: "Indogaro Production Build & Release"
+name: Build and Release Autonomous Daemon & APK
 
 on:
   push:
     branches:
-      - "master"
-      - "main"
+      - main
+      - master
     tags:
-      - "v*"
-  pull_request:
-    branches:
-      - "master"
-      - "main"
+      - 'v*'
   workflow_dispatch:
-    inputs:
-      tag_name:
-        description: "Manual Tag/Version Name (contoh: 1.0.760)"
-        required: false
-        default: ""
 
 permissions:
   contents: write
-  packages: write
-  actions: write
-  id-token: write
 
 jobs:
-  build-and-release:
-    name: "Build Signed Headless APK & Publish"
+  build-daemon:
+    name: Build Go Daemon Binaries
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      packages: write
-      actions: write
-
     steps:
-      - name: "Checkout Repository"
+      - name: Checkout Code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: "Setup Go Environment"
+      - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: '1.23.0'
           cache: true
 
-      - name: "Setup Java JDK"
-        uses: actions/setup-java@v4
-        with:
-          distribution: "temurin"
-          java-version: "17"
-
-      - name: "Setup Android SDK"
-        uses: android-actions/setup-android@v3
-
-      - name: "Determine Dynamic Monotonic Versioning"
-        id: versioning
-        run: |
-          RUN_NUM="${{ github.run_number }}"
-          # Base offset agar format versi selalu naik di angka ratusan (1.0.760+)
-          BASE_OFFSET=750
-          V_PATCH=$((BASE_OFFSET + RUN_NUM))
-          V_CODE=$((1000 + RUN_NUM))
-
-          if [ -n "${{ github.event.inputs.tag_name }}" ]; then
-            V_NAME="${{ github.event.inputs.tag_name }}"
-          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            V_NAME="${GITHUB_REF#refs/tags/v}"
-          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            V_NAME="${GITHUB_REF#refs/tags/}"
-          else
-            V_NAME="1.0.${V_PATCH}"
-          fi
-
-          V_NAME="${V_NAME#v}"
-
-          echo "VERSION_CODE=$V_CODE" >> $GITHUB_ENV
-          echo "VERSION_NAME=$V_NAME" >> $GITHUB_ENV
-          echo "Determined Version Name: $V_NAME"
-          echo "Determined Version Code: $V_CODE"
-
-      - name: "Prepare Keystore & AndroidX Properties"
-        run: |
-          mkdir -p android/app
-          echo "android.useAndroidX=true" > android/gradle.properties
-          echo "android.enableJetifier=true" >> android/gradle.properties
-          echo "org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8" >> android/gradle.properties
-
-          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
-            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.keystore
-          else
-            keytool -genkeypair -v \
-              -keystore android/app/release.keystore \
-              -alias aikukey \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 20000 \
-              -storepass aikurelease2026 \
-              -keypass aikurelease2026 \
-              -storetype PKCS12 \
-              -dname "CN=IndogaroService, OU=NetworkCore, O=Indogaro, L=Jakarta, ST=ID, C=ID"
-          fi
-
-      - name: "Compile Go Native Daemon"
+      - name: Verify and Tidy Go Modules
         run: |
           go mod tidy
-          mkdir -p android/app/src/main/assets
-          mkdir -p release-output
+          go mod verify
 
-          # Inject current version string into binary via ldflags
-          CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build \
-            -ldflags="-s -w -X aiku-daemon/internal/updater.CurrentVersion=${{ env.VERSION_NAME }}" \
-            -o android/app/src/main/assets/aiku-daemon ./cmd/daemon
-
-          cp android/app/src/main/assets/aiku-daemon release-output/aiku-daemon
-
-          if [ -f bin/coba ]; then
-            cp bin/coba android/app/src/main/assets/coba
-          elif [ -f coba ]; then
-            cp coba android/app/src/main/assets/coba
-          fi
-
-          if [ -f .env ]; then
-            cp .env android/app/src/main/assets/app.env
-          else
-            touch android/app/src/main/assets/app.env
-          fi
-
-          [ -f config.yaml ] && cp config.yaml android/app/src/main/assets/ || touch android/app/src/main/assets/config.yaml
-          [ -f state.json ] && cp state.json android/app/src/main/assets/ || echo '{"proxy_state":"ON"}' > android/app/src/main/assets/state.json
-          [ -f brain.dat ] && cp brain.dat android/app/src/main/assets/ || touch android/app/src/main/assets/brain.dat
-
-          if [ -d blocklists ]; then
-            cp -r blocklists android/app/src/main/assets/
-          else
-            mkdir -p android/app/src/main/assets/blocklists
-          fi
-
-      - name: "Assemble Signed Release APK"
-        env:
-          KEYSTORE_PATH: "release.keystore"
-          KEYSTORE_STORE_PASSWORD: "aikurelease2026"
-          KEYSTORE_KEY_ALIAS: "aikukey"
-          KEYSTORE_KEY_PASSWORD: "aikurelease2026"
-          VERSION_CODE: ${{ env.VERSION_CODE }}
-          VERSION_NAME: ${{ env.VERSION_NAME }}
+      - name: Build Core Daemon
         run: |
-          cd android
-          gradle wrapper --gradle-version 8.5
-          chmod +x gradlew
-          ./gradlew assembleRelease --no-daemon
-          cd ..
-          cp android/app/build/outputs/apk/release/app-release.apk release-output/indogaro-service-v${{ env.VERSION_NAME }}.apk
+          mkdir -p dist
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w -X main.Version=${{ github.ref_name }}" -o dist/aiku-daemon-linux-arm64 cmd/daemon/main.go
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w -X main.Version=${{ github.ref_name }}" -o dist/aiku-daemon-linux-amd64 cmd/daemon/main.go
 
-      - name: "Upload Artifacts"
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: "indogaro-service-v${{ env.VERSION_NAME }}.apk"
-          path: release-output/indogaro-service-v${{ env.VERSION_NAME }}.apk
+          name: daemon-binaries
+          path: dist/*
 
-      - name: "Publish Official GitHub Release"
-        if: startsWith(github.ref, 'refs/tags/v') || contains(github.event.head_commit.message, '[release]') || github.event_name == 'workflow_dispatch'
-        uses: softprops/action-gh-release@v2
+  build-android:
+    name: Build Companion APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Java JDK
+        uses: actions/setup-java@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', env.VERSION_NAME) }}
-          name: "Indogaro Core Service v${{ env.VERSION_NAME }}"
-          draft: false
-          prerelease: false
-          generate_release_notes: true
-          files: |
-            release-output/indogaro-service-v${{ env.VERSION_NAME }}.apk
-            release-output/aiku-daemon
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Gradle Cache
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Build Android Release APK
+        run: |
+          cd android
+          chmod +x gradlew || true
+          gradle assembleRelease --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: companion-apk
+          path: android/app/build/outputs/apk/release/*.apk
