@@ -4,34 +4,18 @@ set -e
 REPO_DIR="/data/data/com.termux/files/home/aiku-daemon"
 cd "$REPO_DIR"
 
-echo "==> [AICLO] Menyiapkan safe directory Git..."
-git config --global --add safe.directory "$REPO_DIR" 2>/dev/null || true
+echo "==> [AICLO] Menjalankan go mod tidy..."
+go mod tidy
 
-echo "==> [AICLO] Staging seluruh berkas..."
+echo "==> [AICLO] Menjalankan test compile lokal..."
+go build -v -o /dev/null cmd/daemon/main.go
+
+echo "==> [AICLO] Commit dan push perbaikan..."
 git add -A
+git commit -m "fix(daemon): implement StartInPlaceHotUpdater and upgrade Go module dependencies" || true
 
-# Periksa status working tree
-if git diff-index --quiet HEAD -- 2>/dev/null; then
-    echo "==> [AICLO] Tidak ada berkas baru yang belum di-commit."
-else
-    COMMIT_MSG="feat(core): autonomous sync and update QS Tile, OTA notification, and core daemon"
-    echo "==> [AICLO] Membuat commit: ${COMMIT_MSG}"
-    git commit -m "${COMMIT_MSG}"
-fi
-
-# Deteksi branch saat ini
 BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
-if [ "$BRANCH" = "HEAD" ] || [ -z "$BRANCH" ]; then
-    BRANCH="main"
-fi
+REMOTE=$(git remote | head -n 1 || echo "origin")
 
-# Deteksi remote target
-REMOTE=$(git remote | head -n 1)
-if [ -z "$REMOTE" ]; then
-    REMOTE="origin"
-fi
-
-echo "==> [AICLO] Mengeksekusi push ke ${REMOTE}/${BRANCH}..."
 git push -u "$REMOTE" "$BRANCH"
-
-echo "==> [AICLO SUCCESS] Seluruh repositori berhasil di-push!"
+echo "==> [AICLO SUCCESS] Fix berhasil diuji dan di-push ke repository!"
