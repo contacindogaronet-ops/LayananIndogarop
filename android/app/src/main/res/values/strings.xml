@@ -1,8 +1,10 @@
-<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Indogaro Core Service</string>
-    <string name="service_channel_name">Indogaro Background Core</string>
-    <string name="service_channel_desc">Persistent Headless Multiplexer &amp; Proxy Engine</string>
-    <string name="notification_title">Indogaro Network Service</string>
-    <string name="notification_active">127.0.0.3:2007 &amp; 2008 Active (Zero-Jitter)</string>
+    <string name="service_name">Indogaro Network Daemon</string>
+    <string name="tile_label">Indogaro Core</string>
+    <string name="tile_active">Indogaro: Running</string>
+    <string name="tile_inactive">Indogaro: Stopped</string>
+    <string name="update_available_title">⚡ Pembaruan Sistem Tersedia</string>
+    <string name="update_available_desc">Versi baru Indogaro Core siap dipasang. Klik untuk memperbarui.</string>
+    <string name="btn_update_now">UPDATE SEKARANG</string>
 </resources>
